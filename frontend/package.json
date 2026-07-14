@@ -1,0 +1,1 @@
+{"name":"mission-control","private":true,"version":"0.1.0","scripts":{"dev":"vite","build":"tsc -b && vite build"},"dependencies":{"@vitejs/plugin-react":"latest","plotly.js-dist-min":"latest","react":"latest","react-dom":"latest"},"devDependencies":{"@types/react":"latest","@types/react-dom":"latest","typescript":"latest","vite":"latest"}}

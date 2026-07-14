@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: xauusd
+      POSTGRES_USER: xauusd
+      POSTGRES_PASSWORD: change-me-before-deployment
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  api:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      XAU_DATABASE_URL: postgresql+psycopg://xauusd:change-me-before-deployment@postgres:5432/xauusd
+      XAU_EXECUTION_ENABLED: "false"
+      XAU_TRADING_MODE: demo
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

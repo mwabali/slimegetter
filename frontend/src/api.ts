@@ -1,0 +1,21 @@
+export type Health={state:string;message:string;checked_at:string};
+export type SystemStatus={platform_mode:string;execution_enabled:boolean;kill_switch_active:boolean|null;mt5:Health;shadow_worker:Health;journal:Health;websocket:Health;news:Health;strategy_shadow_worker:Health;simulation_worker:Health;database:Health;calendar:Health;levi:Health;backtester:Health;disk:Health};
+export type SimulatedPosition={id:string;correlation_id:string;strategy_version:string;symbol:string;side:string;volume:number;entry_price:number;stop_loss:number;take_profit:number;exit_price:number|null;pnl:number|null;status:string;close_reason:string|null;opened_at:string;closed_at:string|null};
+export type Account={account_type:string;balance:number;equity:number;free_margin:number;used_margin:number|null;margin_level:number|null;floating_pnl:number|null;currency:string|null;leverage:number|null;current_exposure_pct:number;realized_daily_pnl:number;realized_weekly_pnl:number;open_position_count:number;orders_sent:number;capital_mode:string;configured_risk_per_trade_pct:number;maximum_daily_loss_pct:number;maximum_weekly_loss_pct:number;execution_permission:string};
+export type SymbolQuote={symbol:string;bid:number|null;ask:number|null;spread:number|null;tick_time_msc:number|null};
+export type Position={ticket:string;symbol:string;side:string;volume:number;price_open:number;stop_loss:number|null;take_profit:number|null;profit:number;opened_at:string|null};
+export type Fill={deal_ticket:string;order_ticket:string|null;symbol:string;side:string;volume:number;price:number;profit:number;filled_at:string};
+export type ClosedTrade={strategy_version:string;session:string;pnl:number;reward_risk:number;source_deal_ticket:string|null;closed_at:string|null};
+export type Experiment={id:string;name:string;status:string;proposal:Record<string,unknown>;created_at:string|null};
+export type Agent={name:string;role:string;state:string;correlation_id:string|null;last_run_at:string|null;latest_output:Record<string,unknown>|null};
+export type Cycle={correlation_id:string;completed_at:string|null;final_message:string|null;event_count:number};
+export type JournalEvent={correlation_id:string;sequence:number;timestamp:string|null;bot:string;event_type:string;payload:Record<string,unknown>};
+export type JournalPage={items:JournalEvent[];offset:number;limit:number;total:number};
+export type ChartBar={timestamp:string;open:number;high:number;low:number;close:number};
+export type ChartMarker={timestamp:string|null;label:string;marker_type:string;correlation_id:string;sequence:number};
+export type Chart={symbol:string;bars:ChartBar[];markers:ChartMarker[]};
+export type StrategyRanking={strategy_name:string;version:string;status:string;trade_count:number;win_rate:number|null;profit_factor:number|null;average_reward_risk:number|null;net_return:number|null;maximum_drawdown:number|null;promotion_status:string};
+export type Learning={lessons:string[];recommendations:string[];warnings:string[];insufficient_data:boolean;strategies:StrategyRanking[];paper_strategies:StrategyRanking[]};
+const base=import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000/api/v1";
+async function read<T>(path:string):Promise<T>{const r=await fetch(base+path);if(!r.ok)throw new Error(`${r.status} ${r.statusText}`);return r.json() as Promise<T>}
+export const api={status:()=>read<SystemStatus>("/system/status"),account:()=>read<Account>("/mt5/account"),quote:()=>read<SymbolQuote>("/mt5/symbols/xauusd"),positions:()=>read<Position[]>("/mt5/positions"),simulatedPositions:()=>read<SimulatedPosition[]>("/simulation/positions"),fills:()=>read<Fill[]>("/mt5/fills"),closedTrades:()=>read<ClosedTrade[]>("/mt5/closed-trades"),experiments:()=>read<Experiment[]>("/experiments"),chart:()=>read<Chart>("/mt5/chart/xauusd"),agents:()=>read<Agent[]>("/agents/status"),cycle:()=>read<Cycle|null>("/cycles/current"),learning:()=>read<Learning>("/learning"),journal:(agent="",correlation="")=>read<JournalPage>(`/journal?limit=50${agent?`&agent=${encodeURIComponent(agent)}`:""}${correlation?`&correlation_id=${encodeURIComponent(correlation)}`:""}`),replay:(id:string)=>read<JournalEvent[]>(`/replay/${id}`),wsUrl:base.replace("http","ws").replace("/api/v1","")+"/api/v1/ws/mission-control"};

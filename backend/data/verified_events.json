@@ -1,0 +1,40 @@
+{
+  "verified_until": "2026-07-31T23:59:59Z",
+  "events": [
+    {
+      "title": "Consumer Price Index for June 2026",
+      "impact": "HIGH",
+      "scheduled_at": "2026-07-14T12:30:00Z",
+      "source": "U.S. Bureau of Labor Statistics",
+      "source_url": "https://www.bls.gov/schedule/2026/07_sched.htm"
+    },
+    {
+      "title": "Producer Price Index for June 2026",
+      "impact": "HIGH",
+      "scheduled_at": "2026-07-15T12:30:00Z",
+      "source": "U.S. Bureau of Labor Statistics",
+      "source_url": "https://www.bls.gov/schedule/2026/07_sched.htm"
+    },
+    {
+      "title": "Federal Reserve Beige Book",
+      "impact": "HIGH",
+      "scheduled_at": "2026-07-15T18:00:00Z",
+      "source": "Federal Reserve Board",
+      "source_url": "https://www.federalreserve.gov/newsevents/2026-july.htm"
+    },
+    {
+      "title": "FOMC policy decision and press conference",
+      "impact": "HIGH",
+      "scheduled_at": "2026-07-29T18:00:00Z",
+      "source": "Federal Reserve Board",
+      "source_url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+    },
+    {
+      "title": "GDP advance estimate, Q2 2026",
+      "impact": "HIGH",
+      "scheduled_at": "2026-07-30T12:30:00Z",
+      "source": "U.S. Bureau of Economic Analysis",
+      "source_url": "https://www.bea.gov/news/schedule"
+    }
+  ]
+}
