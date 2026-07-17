@@ -34,6 +34,7 @@ class ShadowModeRunner:
         minimum_market_quality: Decimal = Decimal("7.00"),
         observation_override: bool = False,
         similar_market_performance: SimilarMarketPerformance | None = None,
+        exploration_trade_when_flat: bool = False,
     ) -> DecisionPreview:
         gateway.connect()
         try:
@@ -61,6 +62,7 @@ class ShadowModeRunner:
                 minimum_market_quality,
                 observation_override,
                 similar_market_performance,
+                exploration_trade_when_flat,
             )
         finally:
             gateway.shutdown()

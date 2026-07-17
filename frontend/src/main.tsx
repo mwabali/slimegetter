@@ -156,12 +156,13 @@ function App() {
 
   const active = replayEvents[replayIndex];
   const error = Object.entries(sourceErrors).map(([name, message]) => `${name}: ${message}`).join(" · ") || undefined;
-  const health = status ? {
+  const health = status ? Object.fromEntries(Object.entries({
     MT5: status.mt5, Database: status.database, Journal: status.journal,
     "Agent worker": status.shadow_worker, "Strategy worker": status.strategy_shadow_worker,
-    "Simulation worker": status.simulation_worker, News: status.news, Calendar: status.calendar,
+    "Simulation worker": status.simulation_worker, "Position manager": status.demo_position_manager,
+    News: status.news, Calendar: status.calendar,
     Levi: status.levi, Backtester: status.backtester, Disk: status.disk,
-  } : {};
+  }).filter((entry): entry is [string, NonNullable<typeof entry[1]>] => entry[1] != null)) : {};
 
   return <main>
     <SystemBar status={status} quote={quote}/>

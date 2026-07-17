@@ -10,7 +10,7 @@ from app.agents.erwin.service import CommanderErwinService
 from app.agents.mikasa.models import MikasaAssessment, SimilarMarketPerformance
 from app.agents.mikasa.service import MikasaService
 from app.domain.market.models import EconomicEvent, MarketSnapshot
-from app.domain.trading.models import AccountSnapshot, RiskDecision, RiskProfile, TradeProposal
+from app.domain.trading.models import AccountSnapshot, RiskDecision, RiskProfile, Side, TradeProposal
 
 
 class DecisionPreview(BaseModel):
@@ -57,6 +57,7 @@ class DecisionPreviewWorkflow:
         minimum_market_quality: Decimal = Decimal("7.00"),
         observation_override: bool = False,
         similar_market_performance: SimilarMarketPerformance | None = None,
+        exploration_trade_when_flat: bool = False,
     ) -> DecisionPreview:
         correlation_id = uuid4()
         annie = self._annie.assess(events, source_freshness_minutes)
@@ -72,7 +73,29 @@ class DecisionPreviewWorkflow:
         try:
             eren = self._eren.generate(market, profile.risk_per_trade_pct, correlation_id)
         except ValueError as exc:
-            return DecisionPreview(annie=annie, mikasa=mikasa, eren=None, erwin=None, correlation_id=correlation_id, final_message=f"HOLD: {exc}")
+            if exploration_trade_when_flat:
+                side = Side.BUY if market.rsi >= Decimal("50") or market.ema_fast >= market.ema_slow else Side.SELL
+                entry = market.ask if side is Side.BUY else market.bid
+                stop_distance = market.atr
+                target_distance = market.atr * Decimal("1.2")
+                eren = TradeProposal(
+                    correlation_id=correlation_id,
+                    side=side,
+                    volume=Decimal("0.01"),
+                    entry_price=entry,
+                    stop_loss=entry - stop_distance if side is Side.BUY else entry + stop_distance,
+                    take_profit=entry + target_distance if side is Side.BUY else entry - target_distance,
+                    confidence=Decimal("0.51"),
+                    reasons=(
+                        f"Demo exploration fallback after normal setup returned: {exc}",
+                        "Direction chosen from weak EMA/RSI momentum so the demo account can collect execution evidence",
+                    ),
+                    indicators_used=("EMA", "RSI", "ATR", "DEMO_EXPLORATION"),
+                    expected_risk_pct=profile.risk_per_trade_pct,
+                    session=market.session.value,
+                )
+            else:
+                return DecisionPreview(annie=annie, mikasa=mikasa, eren=None, erwin=None, correlation_id=correlation_id, final_message=f"HOLD: {exc}")
         adjusted_confidence = (eren.confidence * mikasa.confidence_multiplier).quantize(Decimal("0.0001"))
         adjusted_risk = min(
             profile.risk_per_trade_pct,

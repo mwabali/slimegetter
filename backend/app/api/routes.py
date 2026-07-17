@@ -25,7 +25,7 @@ from app.application.workflows.decision_preview import (
     DecisionPreviewWorkflow,
 )
 from app.domain.journal.models import DecisionTimelineEvent
-from app.domain.dashboard.models import AccountDashboardSnapshot, AgentDashboardStatus, ChartBar, ChartMarker, ChartResponse, ClosedTradeDashboardItem, CycleDashboardSummary, FillDashboardItem, HealthState, JournalPage, LearningDashboardResponse, PlatformMode, PositionDashboardItem, ServiceHealth, SimulatedPositionDashboardItem, StrategyRanking, StrategyRegistryItem, SymbolDashboardSnapshot, SystemStatusResponse
+from app.domain.dashboard.models import AccountDashboardSnapshot, AgentDashboardStatus, BrokerClosedPositionDashboardItem, ChartBar, ChartMarker, ChartResponse, ClosedTradeDashboardItem, CycleDashboardSummary, FillDashboardItem, HealthState, JournalPage, LearningDashboardResponse, PlatformMode, PositionDashboardItem, ServiceHealth, SimulatedPositionDashboardItem, StrategyRanking, StrategyRegistryItem, SymbolDashboardSnapshot, SystemStatusResponse
 from app.domain.trading.models import AccountSnapshot, RiskDecision, RiskProfile, TradeProposal
 from app.domain.journal.repository import TradeJournalRepository
 from app.infrastructure.persistence.database import get_session
@@ -87,9 +87,20 @@ def system_status(session: Session = Depends(get_session)) -> SystemStatusRespon
     now = datetime.now(UTC); settings = get_settings()
     mode = PlatformMode.READ_ONLY_SHADOW_MODE if not settings.execution_enabled else PlatformMode.DEMO_EXECUTION
     mt5_health = ServiceHealth(state=HealthState.UNKNOWN, message="MT5 worker status unavailable", checked_at=now)
+    mt5_permissions: dict[str, bool | None] = {
+        "terminal_trade_allowed": None,
+        "account_trade_allowed": None,
+        "account_trade_expert": None,
+    }
     try:
-        gateway = MetaTrader5Gateway.from_installed_package(allow_orders=False); gateway.connect(); gateway.get_tick("XAUUSD"); gateway.shutdown()
-        mt5_health = ServiceHealth(state=HealthState.HEALTHY, message="Connected to demo terminal; read-only", checked_at=now)
+        gateway = MetaTrader5Gateway.from_installed_package(allow_orders=False); gateway.connect(); gateway.get_tick("XAUUSD")
+        mt5_permissions = gateway.terminal_permissions()
+        gateway.shutdown()
+        terminal_flag = mt5_permissions.get("terminal_trade_allowed")
+        if settings.execution_enabled and terminal_flag is False:
+            mt5_health = ServiceHealth(state=HealthState.DEGRADED, message="Connected to demo terminal, but MT5 AutoTrading is off", checked_at=now)
+        else:
+            mt5_health = ServiceHealth(state=HealthState.HEALTHY, message="Connected to demo terminal; read-only", checked_at=now)
     except Exception as exc:
         mt5_health = ServiceHealth(state=HealthState.UNAVAILABLE, message=f"MT5 unavailable: {type(exc).__name__}", checked_at=now)
     worker_name = "demo-worker" if settings.execution_enabled else "shadow-worker"
@@ -129,6 +140,16 @@ def system_status(session: Session = Depends(get_session)) -> SystemStatusRespon
         if simulation_seen.tzinfo is None: simulation_seen = simulation_seen.replace(tzinfo=UTC)
         simulation_age = (now - simulation_seen).total_seconds()
         simulation_worker = ServiceHealth(state=HealthState.HEALTHY if simulation_heartbeat.status == "HEALTHY" and simulation_age < 900 else HealthState.DEGRADED, message=simulation_heartbeat.message, checked_at=simulation_seen)
+    position_manager = ServiceHealth(state=HealthState.UNKNOWN, message="demo-position-manager has not reported", checked_at=now)
+    try:
+        position_heartbeat = _journal.latest_heartbeat(session, "demo-position-manager")
+    except SQLAlchemyError:
+        position_heartbeat = None
+    if position_heartbeat:
+        position_seen = position_heartbeat.last_seen_at
+        if position_seen.tzinfo is None: position_seen = position_seen.replace(tzinfo=UTC)
+        position_age = (now - position_seen).total_seconds()
+        position_manager = ServiceHealth(state=HealthState.HEALTHY if position_heartbeat.status == "HEALTHY" and position_age < 180 else HealthState.DEGRADED, message=position_heartbeat.message, checked_at=position_seen)
     free_disk_gb = shutil.disk_usage(".").free / (1024 ** 3)
     disk_health = ServiceHealth(state=HealthState.HEALTHY if free_disk_gb >= 1 else HealthState.DEGRADED, message=f"{free_disk_gb:.1f} GiB free", checked_at=now)
     levi_health = ServiceHealth(
@@ -139,9 +160,14 @@ def system_status(session: Session = Depends(get_session)) -> SystemStatusRespon
     news_health = ServiceHealth(state=HealthState.DEGRADED, message="Official BLS calendar is queried by the worker; Fed/manual lockouts still require verification", checked_at=now)
     return SystemStatusResponse(
         platform_mode=mode, execution_enabled=settings.execution_enabled, kill_switch_active=settings.kill_switch_active,
+        demo_exploration_enabled=settings.demo_exploration_enabled,
+        mt5_terminal_trade_allowed=mt5_permissions.get("terminal_trade_allowed"),
+        mt5_account_trade_allowed=mt5_permissions.get("account_trade_allowed"),
+        mt5_account_expert_allowed=mt5_permissions.get("account_trade_expert"),
         mt5=mt5_health, shadow_worker=worker_health, journal=journal_health,
         websocket=ServiceHealth(state=HealthState.HEALTHY, message="API event stream enabled; worker events reconcile from the journal", checked_at=now),
-        news=news_health, strategy_shadow_worker=strategy_worker, simulation_worker=simulation_worker, database=journal_health,
+        news=news_health, strategy_shadow_worker=strategy_worker, simulation_worker=simulation_worker,
+        demo_position_manager=position_manager, database=journal_health,
         calendar=news_health, levi=levi_health,
         backtester=ServiceHealth(state=HealthState.HEALTHY, message="Deterministic backtest service loaded", checked_at=now),
         disk=disk_health,
@@ -219,11 +245,13 @@ def simulated_positions(session: Session = Depends(get_session)) -> tuple[Simula
 @router.get("/mt5/fills", response_model=tuple[FillDashboardItem, ...], tags=["dashboard"])
 def mt5_fills(hours: int = 24, session: Session = Depends(get_session)) -> tuple[FillDashboardItem, ...]:
     """Read and persist recent MT5 deals for audit and closed-trade processing."""
+    settings = get_settings()
     gateway = MetaTrader5Gateway.from_installed_package(allow_orders=False)
     gateway.connect()
     try:
         since = datetime.now(UTC) - timedelta(hours=max(1, min(hours, 24 * 30)))
-        fills = gateway.get_recent_fills(since)
+        until = datetime.now(UTC) + timedelta(hours=settings.mt5_server_utc_offset_hours)
+        fills = gateway.get_recent_fills(since, until)
         _mt5_sync.sync_fills(session, fills)
         return tuple(FillDashboardItem(deal_ticket=f.deal_ticket, order_ticket=f.order_ticket, symbol=f.symbol, side=f.side, volume=float(f.volume), price=float(f.price), profit=float(f.profit), filled_at=f.filled_at) for f in fills)
     finally:
@@ -232,13 +260,58 @@ def mt5_fills(hours: int = 24, session: Session = Depends(get_session)) -> tuple
 
 @router.get("/mt5/closed-trades", response_model=tuple[ClosedTradeDashboardItem, ...], tags=["dashboard"])
 def mt5_closed_trades(hours: int = 24 * 30, session: Session = Depends(get_session)) -> tuple[ClosedTradeDashboardItem, ...]:
+    settings = get_settings()
     gateway = MetaTrader5Gateway.from_installed_package(allow_orders=False)
     gateway.connect()
     try:
         since = datetime.now(UTC) - timedelta(hours=max(1, min(hours, 24 * 365)))
-        _mt5_sync.sync_fills(session, gateway.get_recent_fills(since))
+        until = datetime.now(UTC) + timedelta(hours=settings.mt5_server_utc_offset_hours)
+        _mt5_sync.sync_fills(session, gateway.get_recent_fills(since, until))
         rows = session.scalars(select(ClosedTradeRecord).order_by(ClosedTradeRecord.closed_at.desc())).all()
         return tuple(ClosedTradeDashboardItem(strategy_version=row.strategy_version, session=row.session, pnl=float(row.pnl), reward_risk=float(row.reward_risk), source_deal_ticket=row.source_deal_ticket, closed_at=row.closed_at) for row in rows)
+    finally:
+        gateway.shutdown()
+
+
+@router.get("/mt5/closed-positions", response_model=tuple[BrokerClosedPositionDashboardItem, ...], tags=["dashboard"])
+def mt5_closed_positions(hours: int = 24 * 30) -> tuple[BrokerClosedPositionDashboardItem, ...]:
+    """Reconstruct broker-visible closed positions from MT5 deals by position id."""
+    settings = get_settings()
+    gateway = MetaTrader5Gateway.from_installed_package(allow_orders=False)
+    gateway.connect()
+    try:
+        since = datetime.now(UTC) - timedelta(hours=max(1, min(hours, 24 * 365)))
+        until = datetime.now(UTC) + timedelta(hours=settings.mt5_server_utc_offset_hours)
+        raw = gateway._mt5.history_deals_get(since, until)  # type: ignore[attr-defined]
+        if raw is None:
+            return ()
+        deals_by_position: dict[str, list[object]] = defaultdict(list)
+        for deal in raw:
+            if str(getattr(deal, "symbol", "")).upper() != "XAUUSD":
+                continue
+            position_id = str(getattr(deal, "position_id", "") or "")
+            if not position_id:
+                continue
+            deals_by_position[position_id].append(deal)
+        output: list[BrokerClosedPositionDashboardItem] = []
+        for position_id, deals in deals_by_position.items():
+            entries = [deal for deal in deals if getattr(deal, "entry", None) == gateway._mt5.DEAL_ENTRY_IN]  # type: ignore[attr-defined]
+            exits = [deal for deal in deals if getattr(deal, "entry", None) in {gateway._mt5.DEAL_ENTRY_OUT, gateway._mt5.DEAL_ENTRY_OUT_BY}]  # type: ignore[attr-defined]
+            if not entries or not exits:
+                continue
+            entry, exit_deal = entries[0], exits[-1]
+            side = "BUY" if getattr(entry, "type", None) == gateway._mt5.DEAL_TYPE_BUY else "SELL"  # type: ignore[attr-defined]
+            output.append(BrokerClosedPositionDashboardItem(
+                position_id=position_id, symbol=str(getattr(entry, "symbol", "XAUUSD")), side=side,
+                volume=float(getattr(entry, "volume", 0) or 0), entry_price=float(getattr(entry, "price", 0) or 0),
+                exit_price=float(getattr(exit_deal, "price", 0) or 0), pnl=float(getattr(exit_deal, "profit", 0) or 0),
+                opened_at=datetime.fromtimestamp(int(getattr(entry, "time", 0)), UTC),
+                closed_at=datetime.fromtimestamp(int(getattr(exit_deal, "time", 0)), UTC),
+                entry_deal_ticket=str(getattr(entry, "ticket", "")),
+                exit_deal_ticket=str(getattr(exit_deal, "ticket", "")),
+                close_order_ticket=str(getattr(exit_deal, "order", "")) if getattr(exit_deal, "order", 0) else None,
+            ))
+        return tuple(sorted(output, key=lambda item: item.closed_at, reverse=True))
     finally:
         gateway.shutdown()
 

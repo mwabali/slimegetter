@@ -11,13 +11,21 @@ $pidFile = Join-Path $work "runtime-pids.json"
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 if (-not (Test-Path -LiteralPath $python)) { throw "Project Python environment was not found: $python" }
 if (-not (Test-Path -LiteralPath $node)) { throw "Bundled Node.js was not found: $node" }
-if (-not (Test-Path -LiteralPath $vite)) { throw "Dashboard dependencies are missing. Open Codex once and ask it to install frontend dependencies." }
+if (-not (Test-Path -LiteralPath $vite)) { throw "Dashboard dependencies are missing. Run pnpm install in frontend." }
 
-# These explicit values keep a manual launch in observation-only mode.
+$terminalCandidates = @(
+    (Join-Path $env:ProgramFiles "MetaTrader 5\terminal64.exe"),
+    (Join-Path ${env:ProgramFiles(x86)} "MetaTrader 5\terminal64.exe")
+) | Where-Object { Test-Path -LiteralPath $_ }
+if (-not $terminalCandidates) {
+    throw "MetaTrader 5 terminal64.exe was not found. Install MT5 and log into a DEMO account first."
+}
+
 $env:PYTHONPATH = Join-Path $root "backend"
-$env:XAU_EXECUTION_ENABLED = "false"
-$env:XAU_KILL_SWITCH_ACTIVE = "true"
-$env:XAU_DEMO_TRADING_CONFIRMED = "false"
+$env:XAU_TRADING_MODE = "demo"
+$env:XAU_EXECUTION_ENABLED = "true"
+$env:XAU_DEMO_TRADING_CONFIRMED = "true"
+$env:XAU_KILL_SWITCH_ACTIVE = "false"
 
 function Test-Port([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -40,7 +48,8 @@ if (Test-Port 8000) {
 }
 
 $workers = @{
-    shadow = "app.workers.run_shadow_loop"
+    demo = "app.workers.run_demo_loop"
+    manager = "app.workers.run_demo_position_manager_loop"
     simulation = "app.workers.run_simulation_loop"
     strategy = "app.workers.run_strategy_shadow_loop"
 }
@@ -63,6 +72,6 @@ if (Test-Port 5173) {
 $pids | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
 Start-Sleep -Seconds 3
 Start-Process "http://127.0.0.1:5173"
-Write-Host "Mission Control is starting in READ-ONLY SHADOW MODE."
+Write-Host "Mission Control is starting in GUARDED DEMO EXECUTION MODE."
 Write-Host "Dashboard: http://127.0.0.1:5173"
 Write-Host "API health: http://127.0.0.1:8000/api/v1/health"

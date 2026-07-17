@@ -26,6 +26,10 @@ class SystemStatusResponse(BaseModel):
     platform_mode: PlatformMode
     execution_enabled: bool
     kill_switch_active: bool | None
+    demo_exploration_enabled: bool = False
+    mt5_terminal_trade_allowed: bool | None = None
+    mt5_account_trade_allowed: bool | None = None
+    mt5_account_expert_allowed: bool | None = None
     mt5: ServiceHealth
     shadow_worker: ServiceHealth
     journal: ServiceHealth
@@ -33,6 +37,7 @@ class SystemStatusResponse(BaseModel):
     news: ServiceHealth
     strategy_shadow_worker: ServiceHealth
     simulation_worker: ServiceHealth
+    demo_position_manager: ServiceHealth | None = None
     database: ServiceHealth
     calendar: ServiceHealth
     levi: ServiceHealth
@@ -195,6 +200,22 @@ class ClosedTradeDashboardItem(BaseModel):
     reward_risk: float
     source_deal_ticket: str | None
     closed_at: datetime | None
+
+
+class BrokerClosedPositionDashboardItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    position_id: str
+    symbol: str
+    side: str
+    volume: float
+    entry_price: float
+    exit_price: float
+    pnl: float
+    opened_at: datetime
+    closed_at: datetime
+    entry_deal_ticket: str
+    exit_deal_ticket: str
+    close_order_ticket: str | None
 
 
 class ChartBar(BaseModel):

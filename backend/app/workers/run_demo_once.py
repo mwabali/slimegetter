@@ -14,7 +14,7 @@ from app.application.position_sizing import PositionSizer
 from app.application.workflows.decision_preview import DecisionPreview
 from app.config.settings import get_settings
 from app.domain.journal.repository import TradeJournalRepository
-from app.domain.trading.models import ProposalStatus, RiskProfile, SymbolSpecification
+from app.domain.trading.models import PositionSizeResult, ProposalStatus, RiskProfile, SymbolSpecification
 from app.infrastructure.market_data.factory import build_economic_calendar_provider
 from app.infrastructure.mt5.gateway import MetaTrader5Gateway
 from app.infrastructure.persistence.database import SessionLocal
@@ -49,6 +49,8 @@ def run_once() -> str:
         repository.record_heartbeat(session, "demo-worker", "RUNNING", "Guarded demo cycle started")
     profile = _profile(settings)
     observation_active = bool(settings.observation_mode_until and datetime.now(UTC) < settings.observation_mode_until)
+    exploration_active = bool(settings.demo_exploration_enabled)
+    minimum_market_quality = Decimal(str(settings.demo_exploration_min_market_quality)) if exploration_active else Decimal(str(settings.observation_min_market_quality)) if observation_active else Decimal("7.00")
     gateway = MetaTrader5Gateway.from_installed_package(
         allow_orders=True,
         kill_switch=lambda: get_settings().kill_switch_active,
@@ -60,8 +62,9 @@ def run_once() -> str:
         settings.max_tick_age_seconds,
         settings.max_bar_age_seconds,
         settings.mt5_server_utc_offset_hours,
-        Decimal(str(settings.observation_min_market_quality)) if observation_active else Decimal("7.00"),
-        observation_active,
+        minimum_market_quality,
+        observation_active or exploration_active,
+        exploration_trade_when_flat=exploration_active,
     )
 
     if preview.eren is None or preview.erwin is None or preview.erwin.status is not ProposalStatus.APPROVED:
@@ -85,19 +88,42 @@ def run_once() -> str:
             volume_step=Decimal(str(raw.volume_step)),
             trade_contract_size=Decimal(str(raw.trade_contract_size)),
         )
-        sized = PositionSizer().size(preview.eren, account.equity, specification)
-        proposal = preview.eren.model_copy(update={"volume": sized.volume})
+        try:
+            sized = PositionSizer().size(preview.eren, account.equity, specification)
+            proposal = preview.eren.model_copy(update={"volume": sized.volume})
+        except ValueError:
+            if not exploration_active:
+                raise
+            stop_distance = abs(preview.eren.entry_price - preview.eren.stop_loss)
+            risk_amount = Decimal(str(specification.volume_min)) * stop_distance * Decimal(str(specification.trade_contract_size))
+            actual_risk_pct = (risk_amount / account.equity * Decimal("100")).quantize(Decimal("0.0001"))
+            sized = PositionSizeResult(volume=Decimal(str(specification.volume_min)), risk_amount=risk_amount, stop_distance=stop_distance)
+            proposal = preview.eren.model_copy(update={
+                "volume": Decimal(str(specification.volume_min)),
+                "expected_risk_pct": actual_risk_pct,
+                "reasons": (*preview.eren.reasons, "Demo exploration used broker-minimum volume so the bot can collect real execution evidence"),
+            })
         tick = gateway.get_tick("XAUUSD")
         decision = CommanderErwinService().evaluate(proposal, account, profile, tick.ask - tick.bid)
         if decision.status is ProposalStatus.APPROVED and decision.recommended_size_multiplier < Decimal("1"):
             raw_volume = proposal.volume * decision.recommended_size_multiplier
             adjusted_volume = (raw_volume / specification.volume_step).to_integral_value(rounding=ROUND_DOWN) * specification.volume_step
             if adjusted_volume < specification.volume_min:
-                decision = decision.model_copy(update={
-                    "status": ProposalStatus.REJECTED,
-                    "risk_posture": "TECHNICAL_STOP",
-                    "reasons": ("Broker minimum lot cannot express the authorized reduced risk", *decision.reasons),
-                })
+                if exploration_active:
+                    proposal = proposal.model_copy(update={
+                        "volume": Decimal(str(specification.volume_min)),
+                        "reasons": (*proposal.reasons, "Demo exploration retained broker-minimum volume despite Erwin's reduced-size preference"),
+                    })
+                    decision = decision.model_copy(update={
+                        "risk_posture": "DEMO_EXPLORATION_MINIMUM_LOT",
+                        "reasons": ("Demo exploration retained broker-minimum volume to collect execution evidence", *decision.reasons),
+                    })
+                else:
+                    decision = decision.model_copy(update={
+                        "status": ProposalStatus.REJECTED,
+                        "risk_posture": "TECHNICAL_STOP",
+                        "reasons": ("Broker minimum lot cannot express the authorized reduced risk", *decision.reasons),
+                    })
             else:
                 proposal = proposal.model_copy(update={
                     "volume": adjusted_volume,

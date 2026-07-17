@@ -16,6 +16,7 @@ class Mt5Gateway(Protocol):
     def get_symbol_specification(self, symbol: str) -> object: ...
     def get_tick(self, symbol: str) -> "Mt5Tick": ...
     def submit_approved_trade(self, proposal: TradeProposal, idempotency_key: str) -> str: ...
+    def close_position(self, position: "Mt5Position", comment: str) -> str: ...
 
 
 class ExecutionDisabledError(RuntimeError): pass
@@ -194,6 +195,16 @@ class MetaTrader5Gateway:
         if tick is None: raise Mt5AdapterError(f"Tick unavailable: {symbol}")
         return Mt5Tick(symbol=symbol, bid=Decimal(str(tick.bid)), ask=Decimal(str(tick.ask)), time_msc=int(tick.time_msc))
 
+    def terminal_permissions(self) -> dict[str, bool | None]:
+        terminal = self._mt5.terminal_info()
+        account = self._mt5.account_info()
+        return {
+            "terminal_trade_allowed": getattr(terminal, "trade_allowed", None) if terminal else None,
+            "terminal_tradeapi_disabled": getattr(terminal, "tradeapi_disabled", None) if terminal else None,
+            "account_trade_allowed": getattr(account, "trade_allowed", None) if account else None,
+            "account_trade_expert": getattr(account, "trade_expert", None) if account else None,
+        }
+
     def get_recent_bars(self, symbol: str, count: int = 100) -> tuple[Mt5Bar, ...]:
         if not self._mt5.symbol_select(symbol, True):
             raise Mt5AdapterError(f"Unable to select symbol: {symbol}")
@@ -245,13 +256,62 @@ class MetaTrader5Gateway:
         if not self._allow_orders or self._kill_switch(): raise ExecutionDisabledError("MT5 kill switch or order gate is active")
         if idempotency_key in self._orders: return self._orders[idempotency_key]
         if not self._mt5.symbol_select(proposal.symbol, True): raise Mt5AdapterError(f"Unable to select {proposal.symbol}")
+        permissions = self.terminal_permissions()
+        if permissions["terminal_trade_allowed"] is False:
+            raise Mt5AdapterError("MT5 terminal AutoTrading is disabled: terminal_info.trade_allowed=False. Enable Algo Trading in MT5, then retry.")
+        if permissions["account_trade_allowed"] is False or permissions["account_trade_expert"] is False:
+            raise Mt5AdapterError("MT5 account does not allow expert trading")
+        tick = self.get_tick(proposal.symbol)
         order_type = self._mt5.ORDER_TYPE_BUY if proposal.side is Side.BUY else self._mt5.ORDER_TYPE_SELL
-        request = {"action": self._mt5.TRADE_ACTION_DEAL, "symbol": proposal.symbol, "volume": float(proposal.volume), "type": order_type, "sl": float(proposal.stop_loss), "tp": float(proposal.take_profit), "deviation": 20, "magic": 260713, "comment": f"xau:{idempotency_key[:20]}", "type_time": self._mt5.ORDER_TIME_GTC, "type_filling": self._mt5.ORDER_FILLING_IOC}
-        result = self._mt5.order_send(request)
-        if result is None or result.retcode != self._mt5.TRADE_RETCODE_DONE: raise Mt5AdapterError(f"MT5 order rejected: {getattr(result, 'comment', 'no result')}")
+        price = tick.ask if proposal.side is Side.BUY else tick.bid
+        base_request = {"action": self._mt5.TRADE_ACTION_DEAL, "symbol": proposal.symbol, "volume": float(proposal.volume), "type": order_type, "price": float(price), "sl": float(proposal.stop_loss), "tp": float(proposal.take_profit), "deviation": 50, "magic": 260713, "comment": f"xau:{idempotency_key[:20]}", "type_time": self._mt5.ORDER_TIME_GTC}
+        filling_modes = [self._mt5.ORDER_FILLING_IOC, self._mt5.ORDER_FILLING_FOK, self._mt5.ORDER_FILLING_RETURN]
+        result = None
+        for filling in filling_modes:
+            result = self._mt5.order_send({**base_request, "type_filling": filling})
+            if result is not None and result.retcode == self._mt5.TRADE_RETCODE_DONE:
+                break
+            comment = str(getattr(result, "comment", "")).lower() if result is not None else ""
+            if "unsupported filling" not in comment and "invalid filling" not in comment:
+                break
+        if result is None or result.retcode != self._mt5.TRADE_RETCODE_DONE:
+            raise Mt5AdapterError(f"MT5 order rejected: retcode={getattr(result, 'retcode', 'none')} comment={getattr(result, 'comment', 'no result')}")
         ticket = str(result.order or result.deal)
         self._orders[idempotency_key] = ticket
         return ticket
+
+    def close_position(self, position: Mt5Position, comment: str) -> str:
+        if not self._allow_orders or self._kill_switch(): raise ExecutionDisabledError("MT5 kill switch or order gate is active")
+        permissions = self.terminal_permissions()
+        if permissions["terminal_trade_allowed"] is False:
+            raise Mt5AdapterError("MT5 terminal AutoTrading is disabled: terminal_info.trade_allowed=False. Enable Algo Trading in MT5, then retry.")
+        if not self._mt5.symbol_select(position.symbol, True):
+            raise Mt5AdapterError(f"Unable to select {position.symbol}")
+        tick = self.get_tick(position.symbol)
+        is_buy_position = position.side == "BUY"
+        order_type = self._mt5.ORDER_TYPE_SELL if is_buy_position else self._mt5.ORDER_TYPE_BUY
+        price = tick.bid if is_buy_position else tick.ask
+        base_request = {
+            "action": self._mt5.TRADE_ACTION_DEAL, "position": int(position.ticket),
+            "symbol": position.symbol, "volume": float(position.volume), "type": order_type,
+            "price": float(price), "deviation": 50, "magic": 260713,
+            "comment": comment[:31], "type_time": self._mt5.ORDER_TIME_GTC,
+        }
+        result = None
+        for filling in (self._mt5.ORDER_FILLING_IOC, self._mt5.ORDER_FILLING_FOK, self._mt5.ORDER_FILLING_RETURN):
+            request = {**base_request, "type_filling": filling}
+            for _ in range(3):
+                result = self._mt5.order_send(request)
+                if result is not None:
+                    break
+                time.sleep(0.5)
+            if result is not None and result.retcode == self._mt5.TRADE_RETCODE_DONE: break
+            comment_text = str(getattr(result, "comment", "")).lower() if result is not None else ""
+            if "unsupported filling" not in comment_text and "invalid filling" not in comment_text:
+                break
+        if result is None or result.retcode != self._mt5.TRADE_RETCODE_DONE:
+            raise Mt5AdapterError(f"MT5 close rejected: retcode={getattr(result, 'retcode', 'none')} comment={getattr(result, 'comment', 'no result')} last_error={self._mt5.last_error()}")
+        return str(result.order or result.deal)
 
 
 @dataclass
@@ -272,3 +332,6 @@ class MockMt5Gateway:
     def submit_approved_trade(self, proposal: TradeProposal, idempotency_key: str) -> str:
         if not self.enabled: raise ExecutionDisabledError("Mock execution is disabled")
         return self._orders.setdefault(idempotency_key, f"demo-order-{len(self._orders) + 1}")
+    def close_position(self, position: Mt5Position, comment: str) -> str:
+        if not self.enabled: raise ExecutionDisabledError("Mock execution is disabled")
+        return f"demo-close-{position.ticket}"

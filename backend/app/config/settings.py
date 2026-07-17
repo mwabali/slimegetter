@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     manual_calendar_path: str = "data/verified_events.json"
     observation_mode_until: datetime | None = None
     observation_min_market_quality: float = Field(default=4.0, ge=0, le=10)
+    demo_exploration_enabled: bool = False
+    demo_exploration_min_market_quality: float = Field(default=0.0, ge=0, le=10)
+    demo_position_manager_enabled: bool = False
+    demo_position_poll_seconds: int = Field(default=5, ge=1, le=300)
+    demo_position_max_minutes: int = Field(default=45, ge=1, le=1440)
+    demo_position_profit_target_usd: float = Field(default=0.50, ge=0)
+    demo_position_stop_loss_usd: float = Field(default=6.00, ge=0)
+    demo_position_close_on_opposite_signal: bool = True
+    demo_position_trailing_activation_usd: float = Field(default=0.50, ge=0)
+    demo_position_trailing_giveback_usd: float = Field(default=0.30, ge=0)
+    demo_position_trailing_giveback_pct: float = Field(default=0.35, ge=0, le=1)
+    demo_position_state_path: str = "../work/position-manager-state.json"
     api_title: str = "XAUUSD Mission Control API"
     max_risk_per_trade_pct: float = Field(default=0.25, gt=0, le=5)
     max_daily_loss_pct: float = Field(default=2.0, gt=0, le=20)

@@ -14,6 +14,8 @@ export function SystemBar({status, quote}:{status:SystemStatus|undefined;quote:S
   return <header className="statusbar">
     <div><strong>{status?.platform_mode ?? "LOADING"}</strong><small>Execution: {status?.execution_enabled ? "ENABLED" : "DISABLED"}</small></div>
     <div><span>MT5</span><State value={status?.mt5.state ?? "UNKNOWN"}/></div>
+    <div><span>AutoTrading</span><State value={status?.mt5_terminal_trade_allowed == null ? "UNKNOWN" : status.mt5_terminal_trade_allowed ? "ENABLED" : "DISABLED"}/></div>
+    <div><span>Exploration</span><State value={status?.demo_exploration_enabled ? "ENABLED" : "DISABLED"}/></div>
     <div><span>XAUUSD</span><strong>{quote?.bid?.toFixed(2) ?? "Unavailable"} / {quote?.ask?.toFixed(2) ?? "Unavailable"}</strong></div>
     <div><span>Spread</span><strong>{quote?.spread?.toFixed(2) ?? "Unavailable"}</strong></div>
     <div><span>Kill switch</span><State value={kill == null ? "UNKNOWN" : kill ? "ACTIVE" : "INACTIVE"}/></div>
@@ -71,7 +73,7 @@ export function AccountPanel({account}:{account:Account|undefined}) {
     ["Capital mode", account?.capital_mode], ["Risk / trade %", account?.configured_risk_per_trade_pct],
     ["Daily loss cap %", account?.maximum_daily_loss_pct], ["Weekly loss cap %", account?.maximum_weekly_loss_pct],
     ["Execution permission", account?.execution_permission],
-  ].map(([key, value]) => <div key={String(key)}><dt>{key}</dt><dd>{value ?? "Unavailable"}</dd></div>)}</dl><p className="warning">Shadow mode: no order controls are available.</p></Panel>;
+  ].map(([key, value]) => <div key={String(key)}><dt>{key}</dt><dd>{value ?? "Unavailable"}</dd></div>)}</dl><p className="warning">Demo execution is controlled by MT5 AutoTrading, the kill switch, and the guarded worker.</p></Panel>;
 }
 
 export function DecisionChain({cycle, agents}:{cycle:Cycle|undefined|null;agents:Agent[]|undefined}) {
