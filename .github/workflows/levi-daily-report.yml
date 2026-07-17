@@ -1,0 +1,43 @@
+name: Levi Daily Research Report
+
+on:
+  schedule:
+    - cron: "20 21 * * *"
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: "Optional report date in YYYY-MM-DD"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install backend
+        working-directory: backend
+        run: pip install -e .
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Prepare read-only report database schema
+        working-directory: backend
+        run: python -m alembic upgrade head
+      - name: Generate and commit Levi report
+        working-directory: backend
+        run: |
+          if [ -n "${{ inputs.report_date }}" ]; then
+            python -m app.reporting.levi_daily_report --date "${{ inputs.report_date }}" --commit
+          else
+            python -m app.reporting.levi_daily_report --commit
+          fi
+      - name: Push report commit
+        run: git push

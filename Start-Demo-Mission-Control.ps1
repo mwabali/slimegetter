@@ -90,7 +90,7 @@ $pids | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
 Start-Sleep -Seconds 3
 Start-Process "http://127.0.0.1:5173"
 Write-Host "Mission Control is starting in GUARDED DEMO EXECUTION MODE."
-Write-Host "Position manager: enabled=$env:XAU_DEMO_POSITION_MANAGER_ENABLED policy=$env:XAU_DEMO_POSITION_EXIT_POLICY poll=${env:XAU_DEMO_POSITION_POLL_SECONDS}s validationTarget=$env:XAU_DEMO_POSITION_VALIDATION_TARGET_USD trailingActivation=$env:XAU_DEMO_POSITION_TRAILING_ACTIVATION_USD givebackUsd=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_USD givebackPct=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_PCT"
+Write-Host "Pixis close manager: enabled=$env:XAU_DEMO_POSITION_MANAGER_ENABLED policy=$env:XAU_DEMO_POSITION_EXIT_POLICY poll=${env:XAU_DEMO_POSITION_POLL_SECONDS}s validationTarget=$env:XAU_DEMO_POSITION_VALIDATION_TARGET_USD trailingActivation=$env:XAU_DEMO_POSITION_TRAILING_ACTIVATION_USD givebackUsd=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_USD givebackPct=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_PCT"
 Write-Host "Demo entry worker enabled: $env:XAU_DEMO_ENTRY_ENABLED"
 Write-Host "Dashboard: http://127.0.0.1:5173"
 Write-Host "API health: http://127.0.0.1:8000/api/v1/health"

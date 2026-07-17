@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     levi_enabled: bool = True
     levi_min_interval_minutes: int = Field(default=30, ge=5, le=1440)
+    levi_daily_report_cutoff_hour_utc: int = Field(default=21, ge=0, le=23)
     auth_enabled: bool = False
     admin_api_key: str | None = None
     operator_api_key: str | None = None

@@ -12,6 +12,6 @@ while True:
         print(f"demo_position_manager_cycle: {run_once()}")
     except Exception as exc:
         with SessionLocal() as session:
-            TradeJournalRepository().record_heartbeat(session, "demo-position-manager", "ERROR", f"Position manager blocked: {type(exc).__name__}")
+            TradeJournalRepository().record_heartbeat(session, "demo-position-manager", "ERROR", f"Pixis blocked: {type(exc).__name__}")
         print(f"demo_position_manager_blocked: {type(exc).__name__}: {exc}")
     time.sleep(get_settings().demo_position_poll_seconds)

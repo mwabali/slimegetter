@@ -148,9 +148,9 @@ def system_status(session: Session = Depends(get_session)) -> SystemStatusRespon
         simulation_age = (now - simulation_seen).total_seconds()
         simulation_worker = ServiceHealth(state=HealthState.HEALTHY if simulation_heartbeat.status == "HEALTHY" and simulation_age < 900 else HealthState.DEGRADED, message=simulation_heartbeat.message, checked_at=simulation_seen)
     if not settings.demo_position_manager_enabled:
-        position_manager = ServiceHealth(state=HealthState.DISABLED, message="Demo position manager disabled by configuration", checked_at=now)
+        position_manager = ServiceHealth(state=HealthState.DISABLED, message="Pixis disabled by configuration", checked_at=now)
     else:
-        position_manager = ServiceHealth(state=HealthState.UNKNOWN, message="demo-position-manager has not reported", checked_at=now)
+        position_manager = ServiceHealth(state=HealthState.UNKNOWN, message="Pixis has not reported", checked_at=now)
         try:
             position_heartbeat = _journal.latest_heartbeat(session, "demo-position-manager")
         except SQLAlchemyError:

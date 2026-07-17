@@ -29,6 +29,7 @@ CLOSE_CONFIRM_POLLS = 3
 CLOSE_CONFIRM_SLEEP_SECONDS = 0.5
 CLOSE_RETRY_ATTEMPTS = 3
 XAU_CONTRACT_SIZE = Decimal("100")
+PIXIS_AGENT = "PIXIS"
 PROTECTION_ORDER = {
     STATE_OPEN: 0,
     STATE_MONITORING: 1,
@@ -300,7 +301,7 @@ def _manager_payload(position: Mt5Position, memory: dict[str, object], reason: s
 
 def _record_manager_event(repository: TradeJournalRepository, event_type: str, payload: dict[str, object]) -> None:
     with SessionLocal() as session:
-        repository.record_collective_events(session, uuid4(), ((1, "POSITION_MANAGER", event_type, json.dumps(payload)),))
+        repository.record_collective_events(session, uuid4(), ((1, PIXIS_AGENT, event_type, json.dumps(payload)),))
 
 
 def _record_close_failure_alert(repository: TradeJournalRepository, position_ticket: str, message: str) -> None:
@@ -434,7 +435,7 @@ def run_once() -> dict[str, int]:
     if not settings.demo_position_manager_enabled:
         return {"closed": 0, "open": 0}
     if not settings.execution_enabled or settings.kill_switch_active or settings.trading_mode != "demo":
-        raise RuntimeError("Demo position manager requires demo execution with kill switch off")
+        raise RuntimeError("Pixis requires demo execution with kill switch off")
 
     repository = TradeJournalRepository()
     synchronizer = Mt5ReadOnlySynchronizer()
@@ -454,7 +455,7 @@ def run_once() -> dict[str, int]:
                 record.setdefault("pending_exit_reason", "BROKER_OR_MANUAL_CLOSE_RECONCILED")
                 _record_manager_event(repository, "DEMO_POSITION_RECONCILED_CLOSED", {"source_ticket": ticket, **record})
         with SessionLocal() as session:
-            repository.record_heartbeat(session, "demo-position-manager", "RUNNING", f"Managing {len(positions)} open XAUUSD position(s)")
+            repository.record_heartbeat(session, "demo-position-manager", "RUNNING", f"Pixis managing {len(positions)} open XAUUSD position(s)")
             synchronizer.sync_positions(session, positions)
         for position in positions:
             memory = _update_position_memory(position, state)
