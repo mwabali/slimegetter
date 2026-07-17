@@ -17,10 +17,13 @@ class CommanderErwinService:
         account: AccountSnapshot,
         profile: RiskProfile,
         current_spread: Decimal,
+        execution_locked: bool = False,
     ) -> RiskDecision:
         survival_rejections: list[str] = []
         accepted_warnings: list[str] = []
         size_multiplier = Decimal("1.00")
+        if execution_locked:
+            survival_rejections.append("Execution locked: unresolved critical broker incident requires human resolution")
         if proposal.session not in profile.allowed_sessions:
             accepted_warnings.append(f"Session {proposal.session} is outside the preferred campaign window")
             size_multiplier *= Decimal("0.60")

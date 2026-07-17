@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
 import shutil
+from pathlib import Path
 
 import asyncio
 from collections import defaultdict
@@ -32,7 +33,7 @@ from app.infrastructure.persistence.database import get_session
 from app.infrastructure.news.rss_search import GoogleNewsRssSearch
 from app.config.settings import get_settings
 from app.infrastructure.mt5.gateway import MetaTrader5Gateway, Mt5AdapterError
-from app.infrastructure.persistence.models import AlertRecord, ClosedTradeRecord, ExperimentRecord, ResearchProposalRecord, SimulatedPositionRecord, StrategyRecord
+from app.infrastructure.persistence.models import AlertRecord, ClosedTradeRecord, ExecutionIncidentRecord, ExperimentRecord, ResearchProposalRecord, SimulatedPositionRecord, StrategyRecord
 from app.application.mt5_sync import Mt5ReadOnlySynchronizer
 from app.application.backtesting import BacktestResult, run_ema_rsi_backtest
 from app.strategies.catalog import CATALOG, StrategySpec
@@ -75,6 +76,11 @@ class AlertRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 
 
+class IncidentResolveRequest(BaseModel):
+    resolved_by: str = Field(min_length=2, max_length=128)
+    resolution_note: str = Field(min_length=3, max_length=2000)
+
+
 @router.get("/health", tags=["operations"])
 def health() -> dict[str, str]:
     settings = get_settings()
@@ -85,6 +91,7 @@ def health() -> dict[str, str]:
 def system_status(session: Session = Depends(get_session)) -> SystemStatusResponse:
     """Read-only dashboard status. Unknown is deliberate when a worker has not reported state."""
     now = datetime.now(UTC); settings = get_settings()
+    execution_locked = _journal.has_critical_execution_incident(session)
     mode = PlatformMode.READ_ONLY_SHADOW_MODE if not settings.execution_enabled else PlatformMode.DEMO_EXECUTION
     mt5_health = ServiceHealth(state=HealthState.UNKNOWN, message="MT5 worker status unavailable", checked_at=now)
     mt5_permissions: dict[str, bool | None] = {
@@ -163,6 +170,7 @@ def system_status(session: Session = Depends(get_session)) -> SystemStatusRespon
     news_health = ServiceHealth(state=HealthState.DEGRADED, message="Official BLS calendar is queried by the worker; Fed/manual lockouts still require verification", checked_at=now)
     return SystemStatusResponse(
         platform_mode=mode, execution_enabled=settings.execution_enabled, kill_switch_active=settings.kill_switch_active,
+        execution_locked=execution_locked,
         demo_exploration_enabled=settings.demo_exploration_enabled,
         mt5_terminal_trade_allowed=mt5_permissions.get("terminal_trade_allowed"),
         mt5_account_trade_allowed=mt5_permissions.get("account_trade_allowed"),
@@ -221,12 +229,57 @@ def mt5_xauusd() -> SymbolDashboardSnapshot:
 @router.get("/mt5/positions", response_model=tuple[PositionDashboardItem, ...], tags=["dashboard"])
 def mt5_positions(session: Session = Depends(get_session)) -> tuple[PositionDashboardItem, ...]:
     """Read and persist current MT5 positions; never sends an order."""
+    settings = get_settings()
     gateway = MetaTrader5Gateway.from_installed_package(allow_orders=False)
     gateway.connect()
     try:
         positions = gateway.get_positions()
         _mt5_sync.sync_positions(session, positions)
-        return tuple(PositionDashboardItem(ticket=p.ticket, symbol=p.symbol, side=p.side, volume=float(p.volume), price_open=float(p.price_open), stop_loss=float(p.stop_loss) if p.stop_loss is not None else None, take_profit=float(p.take_profit) if p.take_profit is not None else None, profit=float(p.profit), opened_at=p.opened_at) for p in positions)
+        state_path = Path(settings.demo_position_state_path)
+        manager_state: dict[str, dict[str, object]] = {}
+        if state_path.exists():
+            try:
+                loaded = json.loads(state_path.read_text(encoding="utf-8"))
+                manager_state = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                manager_state = {}
+
+        def parse_dt(value: object) -> datetime | None:
+            if not value:
+                return None
+            try:
+                parsed = datetime.fromisoformat(str(value))
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+            except ValueError:
+                return None
+
+        execution_locked = _journal.has_critical_execution_incident(session)
+        items = []
+        for p in positions:
+            memory = manager_state.get(p.ticket, {})
+            items.append(PositionDashboardItem(
+                ticket=p.ticket, symbol=p.symbol, side=p.side, volume=float(p.volume), price_open=float(p.price_open),
+                stop_loss=float(p.stop_loss) if p.stop_loss is not None else None,
+                take_profit=float(p.take_profit) if p.take_profit is not None else None,
+                profit=float(p.profit), opened_at=p.opened_at,
+                estimated_net_profit=float(memory.get("estimated_net_profit", p.profit)),
+                initial_risk_usd=float(memory["initial_risk_usd"]) if memory.get("initial_risk_usd") else None,
+                current_r=float(memory["current_r"]) if memory.get("current_r") else None,
+                peak_profit=float(memory["peak_profit"]) if memory.get("peak_profit") is not None else None,
+                peak_r=float(memory["peak_r"]) if memory.get("peak_r") else None,
+                active_exit_policy=str(memory.get("active_exit_policy") or settings.demo_position_exit_policy),
+                profit_management_state=str(memory.get("status") or "MONITORING"),
+                breakeven_level=float(memory["breakeven_level"]) if memory.get("breakeven_level") else None,
+                locked_profit_floor=float(memory["locked_profit_floor"]) if memory.get("locked_profit_floor") else None,
+                trailing_floor=float(memory["trailing_floor"]) if memory.get("trailing_floor") else None,
+                allowed_giveback=float(memory["allowed_giveback"]) if memory.get("allowed_giveback") else None,
+                last_sl_modified_at=parse_dt(memory.get("last_sl_modified_at")),
+                close_attempt_count=int(memory.get("close_attempt_count", 0)),
+                pending_exit_reason=str(memory["pending_exit_reason"]) if memory.get("pending_exit_reason") else None,
+                latest_mt5_error=str(memory["latest_mt5_error"]) if memory.get("latest_mt5_error") else None,
+                execution_locked=execution_locked,
+            ))
+        return tuple(items)
     finally:
         gateway.shutdown()
 
@@ -595,6 +648,41 @@ def operational_alerts(session: Session = Depends(get_session)) -> list[dict[str
     return [{"id": str(row.id), "severity": row.severity, "message": row.message, "created_at": row.created_at} for row in rows]
 
 
+@router.get("/ops/execution-incidents", response_model=list[dict[str, object]], tags=["operations"])
+def execution_incidents(session: Session = Depends(get_session)) -> list[dict[str, object]]:
+    return [
+        {
+            "id": str(row.id),
+            "incident_type": row.incident_type,
+            "severity": row.severity,
+            "position_ticket": row.position_ticket,
+            "correlation_id": str(row.correlation_id) if row.correlation_id else None,
+            "message": row.message,
+            "created_at": row.created_at,
+            "resolved_at": row.resolved_at,
+        }
+        for row in _journal.unresolved_execution_incidents(session)
+    ]
+
+
+@router.post("/ops/execution-incidents/{incident_id}/resolve", response_model=dict[str, object], tags=["operations"])
+def resolve_execution_incident(
+    incident_id: str,
+    request: IncidentResolveRequest,
+    session: Session = Depends(get_session),
+    _: Role = Depends(require_role(Role.OPERATOR)),
+) -> dict[str, object]:
+    from uuid import UUID
+    row = session.get(ExecutionIncidentRecord, UUID(incident_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Execution incident not found")
+    row.resolved_at = datetime.now(UTC)
+    row.resolved_by = request.resolved_by
+    row.resolution_note = request.resolution_note
+    session.commit()
+    return {"id": str(row.id), "resolved_at": row.resolved_at, "status": "RESOLVED"}
+
+
 @router.post("/ops/alerts", response_model=dict[str, object], tags=["operations"])
 def create_alert(request: AlertRequest, session: Session = Depends(get_session), _: Role = Depends(require_role(Role.OPERATOR))) -> dict[str, object]:
     row = AlertRecord(severity=request.severity, message=request.message)
@@ -632,7 +720,7 @@ def assess_risk(
 ) -> RiskDecision:
     """Evaluate a proposal without sending an order to MT5, then journal it."""
     try:
-        decision = _erwin.evaluate(proposal, account, profile, current_spread)
+        decision = _erwin.evaluate(proposal, account, profile, current_spread, execution_locked=_journal.has_critical_execution_incident(session))
         _journal.record_assessment(session, proposal, decision)
         return decision
     except ValueError as exc:

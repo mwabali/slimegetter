@@ -65,3 +65,9 @@ def test_scales_excess_risk_instead_of_abandoning_valid_opportunity() -> None:
     result = CommanderErwinService().evaluate(proposal(expected_risk_pct="0.50"), account(), profile(), Decimal("0.5"))
     assert result.status is ProposalStatus.APPROVED
     assert result.recommended_size_multiplier == Decimal("0.50")
+
+
+def test_rejects_when_execution_is_locked() -> None:
+    result = CommanderErwinService().evaluate(proposal(), account(), profile(), Decimal("0.5"), execution_locked=True)
+    assert result.status is ProposalStatus.REJECTED
+    assert any("Execution locked" in reason for reason in result.reasons)

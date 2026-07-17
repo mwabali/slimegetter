@@ -4,12 +4,13 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.journal.models import DecisionTimelineEvent
 from app.domain.dashboard.models import CycleDashboardSummary, JournalListItem, JournalPage
 from app.domain.trading.models import RiskDecision, TradeProposal
-from app.infrastructure.persistence.models import DecisionEventRecord, TradeProposalRecord, WorkerHeartbeatRecord
+from app.infrastructure.persistence.models import DecisionEventRecord, ExecutionIncidentRecord, TradeProposalRecord, WorkerHeartbeatRecord
 
 if TYPE_CHECKING:
     from app.application.workflows.decision_preview import DecisionPreview
@@ -101,6 +102,51 @@ class TradeJournalRepository:
 
     def latest_heartbeat(self, session: Session, worker_name: str) -> WorkerHeartbeatRecord | None:
         return session.scalar(select(WorkerHeartbeatRecord).where(WorkerHeartbeatRecord.worker_name == worker_name).order_by(WorkerHeartbeatRecord.last_seen_at.desc()).limit(1))
+
+    def has_critical_execution_incident(self, session: Session) -> bool:
+        try:
+            return bool(session.scalar(select(ExecutionIncidentRecord.id).where(ExecutionIncidentRecord.severity == "CRITICAL", ExecutionIncidentRecord.resolved_at.is_(None)).limit(1)))
+        except SQLAlchemyError:
+            return False
+
+    def unresolved_execution_incidents(self, session: Session) -> list[ExecutionIncidentRecord]:
+        try:
+            return list(session.scalars(select(ExecutionIncidentRecord).where(ExecutionIncidentRecord.resolved_at.is_(None)).order_by(ExecutionIncidentRecord.created_at.desc())))
+        except SQLAlchemyError:
+            return []
+
+    def create_execution_incident(
+        self,
+        session: Session,
+        incident_type: str,
+        severity: str,
+        message: str,
+        position_ticket: str | None = None,
+        correlation_id: UUID | None = None,
+    ) -> ExecutionIncidentRecord:
+        existing = session.scalar(
+            select(ExecutionIncidentRecord)
+            .where(
+                ExecutionIncidentRecord.incident_type == incident_type,
+                ExecutionIncidentRecord.severity == severity,
+                ExecutionIncidentRecord.position_ticket == position_ticket,
+                ExecutionIncidentRecord.resolved_at.is_(None),
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            return existing
+        incident = ExecutionIncidentRecord(
+            incident_type=incident_type,
+            severity=severity,
+            message=message,
+            position_ticket=position_ticket,
+            correlation_id=correlation_id,
+        )
+        session.add(incident)
+        session.commit()
+        session.refresh(incident)
+        return incident
 
     @staticmethod
     def _record_proposal(session: Session, proposal: TradeProposal, status: str) -> None:

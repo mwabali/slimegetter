@@ -131,8 +131,10 @@ def run_once() -> str:
                 "expected_risk_pct": actual_risk_pct,
                 "reasons": (*preview.eren.reasons, "Demo exploration used broker-minimum volume so the bot can collect real execution evidence"),
             })
+        with SessionLocal() as session:
+            execution_locked = repository.has_critical_execution_incident(session)
         tick = gateway.get_tick("XAUUSD")
-        decision = CommanderErwinService().evaluate(proposal, account, profile, tick.ask - tick.bid)
+        decision = CommanderErwinService().evaluate(proposal, account, profile, tick.ask - tick.bid, execution_locked=execution_locked)
         if decision.status is ProposalStatus.APPROVED and decision.recommended_size_multiplier < Decimal("1"):
             raw_volume = proposal.volume * decision.recommended_size_multiplier
             adjusted_volume = (raw_volume / specification.volume_step).to_integral_value(rounding=ROUND_DOWN) * specification.volume_step
@@ -174,6 +176,14 @@ def run_once() -> str:
                 repository.record_heartbeat(session, "demo-worker", "HEALTHY", "Erwin rejected the resized proposal; no order")
             return "NO_ORDER"
         with SessionLocal() as session:
+            if repository.has_critical_execution_incident(session):
+                repository.append_event(session, proposal.correlation_id, "EXECUTION", "EXECUTION_LOCKED_ORDER_BLOCKED", {
+                    "proposal_id": str(proposal.id),
+                    "execution_authority": False,
+                    "reason": "Unresolved critical execution incident",
+                })
+                repository.record_heartbeat(session, "demo-worker", "ERROR", "Demo order blocked: EXECUTION LOCKED")
+                return "NO_ORDER_EXECUTION_LOCKED"
             existing_attempt = session.scalar(select(ExecutionAttemptRecord).where(ExecutionAttemptRecord.proposal_id == proposal.id))
             if existing_attempt is not None:
                 repository.append_event(session, proposal.correlation_id, "EXECUTION", "DUPLICATE_SUBMISSION_BLOCKED", {
@@ -203,7 +213,16 @@ def run_once() -> str:
         with SessionLocal() as session:
             attempt = session.scalar(select(ExecutionAttemptRecord).where(ExecutionAttemptRecord.proposal_id == proposal.id))
             if attempt:
-                attempt.status = "SUBMITTED"; attempt.broker_ticket = ticket; session.commit()
+                attempt.status = "SUBMITTED"
+                attempt.broker_ticket = ticket
+                attempt.entry_price = proposal.entry_price
+                attempt.initial_stop_loss = proposal.stop_loss
+                attempt.initial_take_profit = proposal.take_profit
+                attempt.initial_risk_price = abs(proposal.entry_price - proposal.stop_loss)
+                attempt.initial_risk_usd = sized.risk_amount
+                attempt.intended_reward_risk = proposal.reward_risk_ratio()
+                attempt.volume = proposal.volume
+                session.commit()
         with SessionLocal() as session:
             repository.record_collective_events(session, proposal.correlation_id, ((6, "EXECUTION", "DEMO_ORDER_SUBMITTED", json.dumps({"ticket": ticket, "volume": str(sized.volume), "risk_amount": str(sized.risk_amount)})),))
             collective = _collective_events(session, proposal.correlation_id, safe_preview.final_message, 7)

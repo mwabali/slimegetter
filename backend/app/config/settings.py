@@ -29,12 +29,38 @@ class Settings(BaseSettings):
     demo_position_manager_enabled: bool = False
     demo_position_poll_seconds: int = Field(default=5, ge=1, le=300)
     demo_position_max_minutes: int = Field(default=45, ge=1, le=1440)
+    demo_position_exit_policy: Literal[
+        "VALIDATION_FIXED_TARGET",
+        "FIXED_TAKE_PROFIT",
+        "BREAKEVEN_THEN_TRAIL",
+        "R_MULTIPLE_TRAIL",
+        "ATR_TRAIL",
+        "STRATEGY_INVALIDATION",
+        "TIME_BASED_EXIT",
+        "HYBRID_PROFIT_PROTECTION",
+    ] = "HYBRID_PROFIT_PROTECTION"
+    demo_position_profit_basis: Literal["MT5_FLOATING", "ESTIMATED_NET"] = "MT5_FLOATING"
+    demo_position_validation_target_usd: float = Field(default=2.00, ge=0)
     demo_position_profit_target_usd: float = Field(default=0.50, ge=0)
     demo_position_stop_loss_usd: float = Field(default=6.00, ge=0)
     demo_position_close_on_opposite_signal: bool = True
+    demo_position_failed_close_retry_seconds: int = Field(default=60, ge=5, le=3600)
+    demo_position_breakeven_activation_usd: float = Field(default=1.00, ge=0)
+    demo_position_breakeven_activation_r: float = Field(default=1.00, ge=0)
+    demo_position_breakeven_buffer_usd: float = Field(default=0.25, ge=0)
+    demo_position_profit_lock_activation_usd: float = Field(default=2.00, ge=0)
+    demo_position_profit_lock_usd: float = Field(default=1.00, ge=0)
+    demo_position_profit_lock_activation_r: float = Field(default=1.50, ge=0)
+    demo_position_profit_lock_r: float = Field(default=0.50, ge=0)
+    demo_position_min_trailing_observations: int = Field(default=3, ge=1, le=1000)
     demo_position_trailing_activation_usd: float = Field(default=0.50, ge=0)
+    demo_position_trailing_activation_r: float = Field(default=2.00, ge=0)
     demo_position_trailing_giveback_usd: float = Field(default=0.30, ge=0)
     demo_position_trailing_giveback_pct: float = Field(default=0.35, ge=0, le=1)
+    demo_position_atr_giveback_multiplier: float = Field(default=0.00, ge=0, le=10)
+    demo_position_spread_cost_buffer_usd: float = Field(default=0.25, ge=0)
+    demo_position_min_sl_modify_seconds: int = Field(default=30, ge=1, le=3600)
+    demo_position_min_sl_improvement_price: float = Field(default=0.10, ge=0)
     demo_position_state_path: str = "../work/position-manager-state.json"
     api_title: str = "XAUUSD Mission Control API"
     max_risk_per_trade_pct: float = Field(default=0.25, gt=0, le=5)

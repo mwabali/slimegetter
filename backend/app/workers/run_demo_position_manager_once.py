@@ -11,11 +11,15 @@ from app.config.settings import get_settings
 from app.domain.journal.repository import TradeJournalRepository
 from app.infrastructure.mt5.gateway import MetaTrader5Gateway, Mt5Position
 from app.infrastructure.persistence.database import SessionLocal
-from app.infrastructure.persistence.models import AlertRecord
 
 
 STATE_OPEN = "OPEN"
 STATE_MONITORING = "MONITORING"
+STATE_BREAKEVEN_ARMED = "BREAKEVEN_ARMED"
+STATE_BREAKEVEN_CONFIRMED = "BREAKEVEN_CONFIRMED"
+STATE_PROFIT_LOCK_ARMED = "PROFIT_LOCK_ARMED"
+STATE_PROFIT_LOCK_CONFIRMED = "PROFIT_LOCK_CONFIRMED"
+STATE_TRAILING_ACTIVE = "TRAILING_ACTIVE"
 STATE_EXIT_TRIGGERED = "EXIT_TRIGGERED"
 STATE_CLOSE_REQUEST_SENT = "CLOSE_REQUEST_SENT"
 STATE_CLOSE_CONFIRMED = "CLOSE_CONFIRMED"
@@ -23,6 +27,20 @@ STATE_CLOSE_FAILED = "CLOSE_FAILED"
 CLOSE_CONFIRM_POLLS = 3
 CLOSE_CONFIRM_SLEEP_SECONDS = 0.5
 CLOSE_RETRY_ATTEMPTS = 3
+XAU_CONTRACT_SIZE = Decimal("100")
+PROTECTION_ORDER = {
+    STATE_OPEN: 0,
+    STATE_MONITORING: 1,
+    STATE_BREAKEVEN_ARMED: 2,
+    STATE_BREAKEVEN_CONFIRMED: 3,
+    STATE_PROFIT_LOCK_ARMED: 4,
+    STATE_PROFIT_LOCK_CONFIRMED: 5,
+    STATE_TRAILING_ACTIVE: 6,
+    STATE_EXIT_TRIGGERED: 7,
+    STATE_CLOSE_REQUEST_SENT: 8,
+    STATE_CLOSE_CONFIRMED: 9,
+    STATE_CLOSE_FAILED: 9,
+}
 
 
 def _position_age_minutes(position: Mt5Position) -> float:
@@ -69,9 +87,23 @@ def _update_position_memory(position: Mt5Position, state: dict[str, dict[str, ob
     })
     record.setdefault("status", STATE_MONITORING)
     record.setdefault("close_attempt_count", 0)
+    record.setdefault("active_exit_policy", get_settings().demo_position_exit_policy)
+    record.setdefault("profit_basis", get_settings().demo_position_profit_basis)
+    record.setdefault("entry_price", str(position.price_open))
+    record.setdefault("initial_stop_loss", str(position.stop_loss) if position.stop_loss is not None else None)
+    record.setdefault("initial_take_profit", str(position.take_profit) if position.take_profit is not None else None)
+    record.setdefault("initial_volume", str(position.volume))
+    if record.get("initial_risk_usd") is None and position.stop_loss is not None:
+        risk_price = abs(position.price_open - position.stop_loss)
+        record["initial_risk_price"] = str(risk_price)
+        record["initial_risk_usd"] = str((risk_price * position.volume * XAU_CONTRACT_SIZE).quantize(Decimal("0.01")))
     record["peak_profit"] = max(float(record.get("peak_profit", current_profit)), current_profit)
     record["trough_profit"] = min(float(record.get("trough_profit", current_profit)), current_profit)
     record["last_profit"] = current_profit
+    initial_risk = Decimal(str(record.get("initial_risk_usd") or "0"))
+    if initial_risk > 0:
+        record["current_r"] = str((position.profit / initial_risk).quantize(Decimal("0.0001")))
+        record["peak_r"] = str((Decimal(str(record["peak_profit"])) / initial_risk).quantize(Decimal("0.0001")))
     record["last_seen_at"] = now
     record["observations"] = int(record.get("observations", 0)) + 1
     if record["status"] == STATE_OPEN:
@@ -90,7 +122,128 @@ def _opposite_signal(gateway: MetaTrader5Gateway, position: Mt5Position) -> bool
     return fast > slow and recent > 0
 
 
-def _close_reason(gateway: MetaTrader5Gateway, position: Mt5Position, memory: dict[str, object]) -> str | None:
+def _advance_state(memory: dict[str, object], new_state: str) -> None:
+    current = str(memory.get("status", STATE_MONITORING))
+    if PROTECTION_ORDER.get(new_state, 0) >= PROTECTION_ORDER.get(current, 0):
+        memory["status"] = new_state
+
+
+def _profit_price(position: Mt5Position, profit_usd: Decimal) -> Decimal:
+    price_delta = profit_usd / (position.volume * XAU_CONTRACT_SIZE)
+    return position.price_open + price_delta if position.side == "BUY" else position.price_open - price_delta
+
+
+def _protective_stop_improves(position: Mt5Position, proposed_stop: Decimal, current_stop: Decimal | None) -> bool:
+    if current_stop is None:
+        return True
+    settings = get_settings()
+    improvement = Decimal(str(settings.demo_position_min_sl_improvement_price))
+    if position.side == "BUY":
+        return proposed_stop >= current_stop + improvement
+    return proposed_stop <= current_stop - improvement
+
+
+def _can_modify_sl(memory: dict[str, object]) -> bool:
+    last = memory.get("last_sl_modified_at")
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(str(last))
+    except ValueError:
+        return True
+    return (datetime.now(UTC) - last_dt).total_seconds() >= get_settings().demo_position_min_sl_modify_seconds
+
+
+def _modify_stop(
+    gateway: MetaTrader5Gateway,
+    repository: TradeJournalRepository,
+    position: Mt5Position,
+    memory: dict[str, object],
+    new_stop: Decimal,
+    event_type: str,
+) -> Mt5Position:
+    if not _can_modify_sl(memory) or not _protective_stop_improves(position, new_stop, position.stop_loss):
+        return position
+    memory["last_sl_modify_requested_at"] = datetime.now(UTC).isoformat()
+    confirmed = gateway.modify_position_protection(position, new_stop, position.take_profit, f"xau-manager:{event_type}")
+    memory["broker_stop_loss"] = str(confirmed.stop_loss)
+    memory["broker_take_profit"] = str(confirmed.take_profit)
+    memory["last_sl_modified_at"] = datetime.now(UTC).isoformat()
+    _record_manager_event(repository, event_type, _manager_payload(confirmed, memory, event_type, new_stop=str(new_stop)))
+    return confirmed
+
+
+def _allowed_giveback(memory: dict[str, object]) -> Decimal:
+    settings = get_settings()
+    peak = Decimal(str(memory.get("peak_profit", 0)))
+    return max(
+        Decimal(str(settings.demo_position_trailing_giveback_usd)),
+        peak * Decimal(str(settings.demo_position_trailing_giveback_pct)),
+        Decimal(str(settings.demo_position_spread_cost_buffer_usd)),
+    )
+
+
+def _hybrid_close_reason(
+    gateway: MetaTrader5Gateway,
+    repository: TradeJournalRepository,
+    position: Mt5Position,
+    memory: dict[str, object],
+) -> str | None:
+    settings = get_settings()
+    if position.stop_loss is None or position.take_profit is None:
+        return "MISSING_BROKER_PROTECTION"
+    age_minutes = _position_age_minutes(position)
+    initial_risk = Decimal(str(memory.get("initial_risk_usd") or "0"))
+    current_r = position.profit / initial_risk if initial_risk > 0 else Decimal("0")
+    breakeven_activation = Decimal(str(settings.demo_position_breakeven_activation_usd))
+    if position.profit >= breakeven_activation or (initial_risk > 0 and current_r >= Decimal(str(settings.demo_position_breakeven_activation_r))):
+        _advance_state(memory, STATE_BREAKEVEN_ARMED)
+        breakeven_stop = _profit_price(position, Decimal(str(settings.demo_position_breakeven_buffer_usd)))
+        try:
+            position = _modify_stop(gateway, repository, position, memory, breakeven_stop, "BREAKEVEN_CONFIRMED")
+            _advance_state(memory, STATE_BREAKEVEN_CONFIRMED)
+            memory["breakeven_level"] = str(breakeven_stop)
+        except Exception as exc:
+            memory["latest_mt5_error"] = f"{type(exc).__name__}: {exc}"
+            _record_manager_event(repository, "BREAKEVEN_MODIFY_FAILED", _manager_payload(position, memory, "BREAKEVEN_MODIFY_FAILED", error=memory["latest_mt5_error"]))
+    lock_activation = Decimal(str(settings.demo_position_profit_lock_activation_usd))
+    lock_profit = Decimal(str(settings.demo_position_profit_lock_usd))
+    if position.profit >= lock_activation or (initial_risk > 0 and current_r >= Decimal(str(settings.demo_position_profit_lock_activation_r))):
+        _advance_state(memory, STATE_PROFIT_LOCK_ARMED)
+        lock_stop = _profit_price(position, lock_profit if initial_risk <= 0 else max(lock_profit, initial_risk * Decimal(str(settings.demo_position_profit_lock_r))))
+        memory["locked_profit_floor"] = str(lock_profit)
+        try:
+            position = _modify_stop(gateway, repository, position, memory, lock_stop, "PROFIT_LOCK_CONFIRMED")
+            _advance_state(memory, STATE_PROFIT_LOCK_CONFIRMED)
+        except Exception as exc:
+            memory["latest_mt5_error"] = f"{type(exc).__name__}: {exc}"
+            _record_manager_event(repository, "PROFIT_LOCK_MODIFY_FAILED", _manager_payload(position, memory, "PROFIT_LOCK_MODIFY_FAILED", error=memory["latest_mt5_error"]))
+    peak_profit = Decimal(str(memory.get("peak_profit", position.profit)))
+    trailing_ready = (
+        int(memory.get("observations", 0)) >= settings.demo_position_min_trailing_observations
+        and (
+            peak_profit >= Decimal(str(settings.demo_position_trailing_activation_usd))
+            or (initial_risk > 0 and Decimal(str(memory.get("peak_r", "0"))) >= Decimal(str(settings.demo_position_trailing_activation_r)))
+        )
+    )
+    if trailing_ready:
+        _advance_state(memory, STATE_TRAILING_ACTIVE)
+        allowed = _allowed_giveback(memory)
+        floor = peak_profit - allowed
+        memory["allowed_giveback"] = str(allowed)
+        memory["trailing_floor"] = str(floor)
+        if position.profit <= floor:
+            return "HYBRID_TRAILING_FLOOR_BREACHED"
+    if settings.demo_position_stop_loss_usd and position.profit <= -Decimal(str(settings.demo_position_stop_loss_usd)):
+        return "LEARNING_STOP_LIMIT"
+    if age_minutes >= settings.demo_position_max_minutes:
+        return "LEARNING_MAX_AGE"
+    if settings.demo_position_close_on_opposite_signal and age_minutes >= 1 and _opposite_signal(gateway, position):
+        return "LEARNING_OPPOSITE_SIGNAL"
+    return None
+
+
+def _close_reason(gateway: MetaTrader5Gateway, position: Mt5Position, memory: dict[str, object], repository: TradeJournalRepository | None = None) -> str | None:
     settings = get_settings()
     age_minutes = _position_age_minutes(position)
     peak_profit = Decimal(str(memory.get("peak_profit", position.profit)))
@@ -101,7 +254,11 @@ def _close_reason(gateway: MetaTrader5Gateway, position: Mt5Position, memory: di
     )
     if position.stop_loss is None or position.take_profit is None:
         return "MISSING_BROKER_PROTECTION"
-    if settings.demo_position_profit_target_usd and position.profit >= Decimal(str(settings.demo_position_profit_target_usd)):
+    if settings.demo_position_exit_policy == "HYBRID_PROFIT_PROTECTION" and repository is not None:
+        return _hybrid_close_reason(gateway, repository, position, memory)
+    if settings.demo_position_exit_policy == "VALIDATION_FIXED_TARGET" and settings.demo_position_validation_target_usd and position.profit >= Decimal(str(settings.demo_position_validation_target_usd)):
+        return "VALIDATION_FIXED_TARGET"
+    if settings.demo_position_exit_policy == "FIXED_TAKE_PROFIT" and settings.demo_position_profit_target_usd and position.profit >= Decimal(str(settings.demo_position_profit_target_usd)):
         return "LEARNING_PROFIT_TARGET"
     if (
         settings.demo_position_trailing_activation_usd
@@ -144,17 +301,31 @@ def _record_manager_event(repository: TradeJournalRepository, event_type: str, p
         repository.record_collective_events(session, uuid4(), ((1, "POSITION_MANAGER", event_type, json.dumps(payload)),))
 
 
-def _record_close_failure_alert(repository: TradeJournalRepository, message: str) -> None:
+def _record_close_failure_alert(repository: TradeJournalRepository, position_ticket: str, message: str) -> None:
     with SessionLocal() as session:
-        session.add(AlertRecord(severity="CRITICAL", message=message))
+        repository.create_execution_incident(
+            session,
+            incident_type="CLOSE_FAILED",
+            severity="CRITICAL",
+            position_ticket=position_ticket,
+            message=message,
+        )
         repository.record_heartbeat(session, "demo-position-manager", "ERROR", message)
-        session.commit()
 
 
-def _latched_close_reason(gateway: MetaTrader5Gateway, position: Mt5Position, memory: dict[str, object]) -> str | None:
+def _latched_close_reason(gateway: MetaTrader5Gateway, position: Mt5Position, memory: dict[str, object], repository: TradeJournalRepository) -> str | None:
     if memory.get("status") in {STATE_EXIT_TRIGGERED, STATE_CLOSE_REQUEST_SENT, STATE_CLOSE_FAILED}:
+        if memory.get("status") == STATE_CLOSE_FAILED:
+            last = memory.get("last_close_requested_at")
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(str(last))
+                    if (datetime.now(UTC) - last_dt).total_seconds() < get_settings().demo_position_failed_close_retry_seconds:
+                        return None
+                except ValueError:
+                    pass
         return str(memory.get("pending_exit_reason") or "LATCHED_EXIT")
-    reason = _close_reason(gateway, position, memory)
+    reason = _close_reason(gateway, position, memory, repository)
     if reason is None:
         return None
     now = datetime.now(UTC).isoformat()
@@ -208,6 +379,7 @@ def _close_and_confirm(
     memory["latest_mt5_error"] = latest_error or "Close request sent but MT5 still reports the position open"
     _record_close_failure_alert(
         repository,
+        position.ticket,
         f"Demo position close failed repeatedly for {position.symbol} ticket {position.ticket}; new entries must remain blocked.",
     )
     return False
@@ -242,7 +414,7 @@ def run_once() -> dict[str, int]:
             synchronizer.sync_positions(session, positions)
         for position in positions:
             memory = _update_position_memory(position, state)
-            reason = _latched_close_reason(gateway, position, memory)
+            reason = _latched_close_reason(gateway, position, memory, repository)
             if reason is None:
                 continue
             _record_manager_event(repository, "DEMO_POSITION_EXIT_TRIGGERED", _manager_payload(position, memory, reason))
@@ -256,8 +428,10 @@ def run_once() -> dict[str, int]:
             active = [
                 f"{position.ticket}:{state.get(position.ticket, {}).get('status', STATE_MONITORING)}"
                 f"/p={position.profit}/peak={state.get(position.ticket, {}).get('peak_profit')}"
-                f"/target={settings.demo_position_profit_target_usd}"
+                f"/policy={state.get(position.ticket, {}).get('active_exit_policy', settings.demo_position_exit_policy)}"
+                f"/target={settings.demo_position_validation_target_usd if settings.demo_position_exit_policy == 'VALIDATION_FIXED_TARGET' else settings.demo_position_profit_target_usd}"
                 f"/reason={state.get(position.ticket, {}).get('pending_exit_reason', '-')}"
+                f"/floor={state.get(position.ticket, {}).get('trailing_floor', '-')}"
                 f"/attempts={state.get(position.ticket, {}).get('close_attempt_count', 0)}"
                 for position in positions
             ]

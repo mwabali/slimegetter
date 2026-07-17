@@ -44,6 +44,14 @@ class ClosedTradeRecord(Base):
     pnl: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False)
     reward_risk: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False)
     source_deal_ticket: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    max_favorable_excursion: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    max_adverse_excursion: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    profit_giveback: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    exit_reason: Mapped[str | None] = mapped_column(String(64))
+    initial_risk_usd: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    exit_r: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    peak_r: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    exit_policy_version: Mapped[str | None] = mapped_column(String(64))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -63,6 +71,22 @@ class AlertRecord(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ExecutionIncidentRecord(Base):
+    __tablename__ = "execution_incidents"
+    __table_args__ = (Index("ix_execution_incidents_unresolved", "severity", "resolved_at"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    incident_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    position_ticket: Mapped[str | None] = mapped_column(String(64), index=True)
+    correlation_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(128))
+    resolution_note: Mapped[str | None] = mapped_column(Text)
 
 
 class WorkerHeartbeatRecord(Base):
@@ -156,5 +180,12 @@ class ExecutionAttemptRecord(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="CLAIMED")
     broker_ticket: Mapped[str | None] = mapped_column(String(64))
     error_type: Mapped[str | None] = mapped_column(String(128))
+    entry_price: Mapped[float | None] = mapped_column(Numeric(16, 5))
+    initial_stop_loss: Mapped[float | None] = mapped_column(Numeric(16, 5))
+    initial_take_profit: Mapped[float | None] = mapped_column(Numeric(16, 5))
+    initial_risk_price: Mapped[float | None] = mapped_column(Numeric(16, 5))
+    initial_risk_usd: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    intended_reward_risk: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

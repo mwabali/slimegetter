@@ -17,6 +17,7 @@ class Mt5Gateway(Protocol):
     def get_tick(self, symbol: str) -> "Mt5Tick": ...
     def submit_approved_trade(self, proposal: TradeProposal, idempotency_key: str) -> str: ...
     def close_position(self, position: "Mt5Position", comment: str) -> str: ...
+    def modify_position_protection(self, position: "Mt5Position", stop_loss: Decimal | None, take_profit: Decimal | None, comment: str) -> "Mt5Position": ...
 
 
 class ExecutionDisabledError(RuntimeError): pass
@@ -313,6 +314,47 @@ class MetaTrader5Gateway:
             raise Mt5AdapterError(f"MT5 close rejected: retcode={getattr(result, 'retcode', 'none')} comment={getattr(result, 'comment', 'no result')} last_error={self._mt5.last_error()}")
         return str(result.order or result.deal)
 
+    def modify_position_protection(self, position: Mt5Position, stop_loss: Decimal | None, take_profit: Decimal | None, comment: str) -> Mt5Position:
+        if not self._allow_orders or self._kill_switch(): raise ExecutionDisabledError("MT5 kill switch or order gate is active")
+        if not self._mt5.symbol_select(position.symbol, True):
+            raise Mt5AdapterError(f"Unable to select {position.symbol}")
+        info = self._mt5.symbol_info(position.symbol)
+        if info is None:
+            raise Mt5AdapterError(f"Unable to inspect symbol: {position.symbol}")
+        digits = int(getattr(info, "digits", 2) or 2)
+        current_sl = position.stop_loss
+        if stop_loss is not None:
+            stop_loss = Decimal(str(round(float(stop_loss), digits)))
+            if current_sl is not None:
+                if position.side == "BUY" and stop_loss < current_sl:
+                    raise Mt5AdapterError("Refusing to loosen BUY protective stop")
+                if position.side == "SELL" and stop_loss > current_sl:
+                    raise Mt5AdapterError("Refusing to loosen SELL protective stop")
+        if take_profit is not None:
+            take_profit = Decimal(str(round(float(take_profit), digits)))
+        request = {
+            "action": self._mt5.TRADE_ACTION_SLTP,
+            "position": int(position.ticket),
+            "symbol": position.symbol,
+            "sl": float(stop_loss if stop_loss is not None else position.stop_loss or 0),
+            "tp": float(take_profit if take_profit is not None else position.take_profit or 0),
+            "magic": 260713,
+            "comment": comment[:31],
+        }
+        result = self._mt5.order_send(request)
+        if result is None or result.retcode != self._mt5.TRADE_RETCODE_DONE:
+            raise Mt5AdapterError(f"MT5 SLTP rejected: retcode={getattr(result, 'retcode', 'none')} comment={getattr(result, 'comment', 'no result')} last_error={self._mt5.last_error()}")
+        for _ in range(3):
+            confirmed = next((open_position for open_position in self.get_positions(position.symbol) if open_position.ticket == position.ticket), None)
+            if confirmed is None:
+                raise Mt5AdapterError("Position disappeared while confirming SL/TP modification")
+            sl_ok = stop_loss is None or confirmed.stop_loss == stop_loss
+            tp_ok = take_profit is None or confirmed.take_profit == take_profit
+            if sl_ok and tp_ok:
+                return confirmed
+            time.sleep(0.5)
+        raise Mt5AdapterError("MT5 SL/TP modification was sent but not visible on the position")
+
 
 @dataclass
 class MockMt5Gateway:
@@ -335,3 +377,13 @@ class MockMt5Gateway:
     def close_position(self, position: Mt5Position, comment: str) -> str:
         if not self.enabled: raise ExecutionDisabledError("Mock execution is disabled")
         return f"demo-close-{position.ticket}"
+    def modify_position_protection(self, position: Mt5Position, stop_loss: Decimal | None, take_profit: Decimal | None, comment: str) -> Mt5Position:
+        if not self.enabled: raise ExecutionDisabledError("Mock execution is disabled")
+        updated = Mt5Position(
+            ticket=position.ticket, symbol=position.symbol, side=position.side, volume=position.volume,
+            price_open=position.price_open, stop_loss=stop_loss if stop_loss is not None else position.stop_loss,
+            take_profit=take_profit if take_profit is not None else position.take_profit,
+            profit=position.profit, opened_at=position.opened_at,
+        )
+        self.positions = tuple(updated if open_position.ticket == position.ticket else open_position for open_position in self.positions)
+        return updated

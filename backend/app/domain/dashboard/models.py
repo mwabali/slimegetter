@@ -26,6 +26,7 @@ class SystemStatusResponse(BaseModel):
     platform_mode: PlatformMode
     execution_enabled: bool
     kill_switch_active: bool | None
+    execution_locked: bool = False
     demo_exploration_enabled: bool = False
     mt5_terminal_trade_allowed: bool | None = None
     mt5_account_trade_allowed: bool | None = None
@@ -159,6 +160,22 @@ class PositionDashboardItem(BaseModel):
     take_profit: float | None
     profit: float
     opened_at: datetime | None
+    estimated_net_profit: float | None = None
+    initial_risk_usd: float | None = None
+    current_r: float | None = None
+    peak_profit: float | None = None
+    peak_r: float | None = None
+    active_exit_policy: str | None = None
+    profit_management_state: str | None = None
+    breakeven_level: float | None = None
+    locked_profit_floor: float | None = None
+    trailing_floor: float | None = None
+    allowed_giveback: float | None = None
+    last_sl_modified_at: datetime | None = None
+    close_attempt_count: int = 0
+    pending_exit_reason: str | None = None
+    latest_mt5_error: str | None = None
+    execution_locked: bool = False
 
 
 class SimulatedPositionDashboardItem(BaseModel):

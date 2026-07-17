@@ -16,6 +16,7 @@ export function SystemBar({status, quote}:{status:SystemStatus|undefined;quote:S
     <div><span>MT5</span><State value={status?.mt5.state ?? "UNKNOWN"}/></div>
     <div><span>AutoTrading</span><State value={status?.mt5_terminal_trade_allowed == null ? "UNKNOWN" : status.mt5_terminal_trade_allowed ? "ENABLED" : "DISABLED"}/></div>
     <div><span>Exploration</span><State value={status?.demo_exploration_enabled ? "ENABLED" : "DISABLED"}/></div>
+    <div><span>Execution lock</span><State value={status?.execution_locked ? "LOCKED" : "CLEAR"}/></div>
     <div><span>XAUUSD</span><strong>{quote?.bid?.toFixed(2) ?? "Unavailable"} / {quote?.ask?.toFixed(2) ?? "Unavailable"}</strong></div>
     <div><span>Spread</span><strong>{quote?.spread?.toFixed(2) ?? "Unavailable"}</strong></div>
     <div><span>Kill switch</span><State value={kill == null ? "UNKNOWN" : kill ? "ACTIVE" : "INACTIVE"}/></div>
