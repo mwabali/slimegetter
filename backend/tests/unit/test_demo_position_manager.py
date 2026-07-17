@@ -187,3 +187,43 @@ def test_failed_close_retry_is_throttled(monkeypatch) -> None:
         assert manager._latched_close_reason(StaticGateway(()), position(profit="2.00"), memory, object()) is None
     finally:
         get_settings.cache_clear()
+
+
+def test_market_closed_failure_sets_cooldown(monkeypatch) -> None:
+    configure_manager(monkeypatch)
+    monkeypatch.setenv("XAU_DEMO_POSITION_MARKET_CLOSED_COOLDOWN_MINUTES", "120")
+    get_settings.cache_clear()
+    open_position = position(profit="-1.00")
+    gateway = StaticGateway((open_position,))
+
+    def market_closed(current, comment):
+        gateway.close_calls += 1
+        raise RuntimeError("MT5 close rejected: retcode=10018 comment=Market closed")
+
+    monkeypatch.setattr(gateway, "close_position", market_closed)
+    monkeypatch.setattr(manager, "_record_manager_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "_record_close_failure_alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager.time, "sleep", lambda seconds: None)
+
+    memory = {"status": manager.STATE_EXIT_TRIGGERED, "pending_exit_reason": "LEARNING_MAX_AGE", "peak_profit": -0.1}
+    try:
+        assert manager._close_and_confirm(gateway, object(), open_position, memory, "LEARNING_MAX_AGE") is False
+        assert memory["status"] == manager.STATE_MARKET_CLOSED_COOLDOWN
+        assert memory["cooldown_reason"] == "MARKET_CLOSED"
+        assert memory.get("next_retry_after")
+        assert gateway.close_calls == 1
+    finally:
+        get_settings.cache_clear()
+
+
+def test_market_closed_cooldown_blocks_latched_retry(monkeypatch) -> None:
+    configure_manager(monkeypatch)
+    memory = {
+        "status": manager.STATE_MARKET_CLOSED_COOLDOWN,
+        "pending_exit_reason": "LEARNING_MAX_AGE",
+        "next_retry_after": "2999-01-01T00:00:00+00:00",
+    }
+    try:
+        assert manager._latched_close_reason(StaticGateway(()), position(profit="-1.00"), memory, object()) is None
+    finally:
+        get_settings.cache_clear()

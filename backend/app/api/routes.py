@@ -277,6 +277,8 @@ def mt5_positions(session: Session = Depends(get_session)) -> tuple[PositionDash
                 close_attempt_count=int(memory.get("close_attempt_count", 0)),
                 pending_exit_reason=str(memory["pending_exit_reason"]) if memory.get("pending_exit_reason") else None,
                 latest_mt5_error=str(memory["latest_mt5_error"]) if memory.get("latest_mt5_error") else None,
+                cooldown_reason=str(memory["cooldown_reason"]) if memory.get("cooldown_reason") else None,
+                next_retry_after=parse_dt(memory.get("next_retry_after")),
                 execution_locked=execution_locked,
             ))
         return tuple(items)

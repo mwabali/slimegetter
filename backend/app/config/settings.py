@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     demo_position_stop_loss_usd: float = Field(default=6.00, ge=0)
     demo_position_close_on_opposite_signal: bool = True
     demo_position_failed_close_retry_seconds: int = Field(default=60, ge=5, le=3600)
+    demo_position_market_closed_cooldown_minutes: int = Field(default=180, ge=1, le=4320)
     demo_position_breakeven_activation_usd: float = Field(default=1.00, ge=0)
     demo_position_breakeven_activation_r: float = Field(default=1.00, ge=0)
     demo_position_breakeven_buffer_usd: float = Field(default=0.25, ge=0)

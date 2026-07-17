@@ -22,6 +22,7 @@ STATE_PROFIT_LOCK_CONFIRMED = "PROFIT_LOCK_CONFIRMED"
 STATE_TRAILING_ACTIVE = "TRAILING_ACTIVE"
 STATE_EXIT_TRIGGERED = "EXIT_TRIGGERED"
 STATE_CLOSE_REQUEST_SENT = "CLOSE_REQUEST_SENT"
+STATE_MARKET_CLOSED_COOLDOWN = "MARKET_CLOSED_COOLDOWN"
 STATE_CLOSE_CONFIRMED = "CLOSE_CONFIRMED"
 STATE_CLOSE_FAILED = "CLOSE_FAILED"
 CLOSE_CONFIRM_POLLS = 3
@@ -38,6 +39,7 @@ PROTECTION_ORDER = {
     STATE_TRAILING_ACTIVE: 6,
     STATE_EXIT_TRIGGERED: 7,
     STATE_CLOSE_REQUEST_SENT: 8,
+    STATE_MARKET_CLOSED_COOLDOWN: 8,
     STATE_CLOSE_CONFIRMED: 9,
     STATE_CLOSE_FAILED: 9,
 }
@@ -313,17 +315,46 @@ def _record_close_failure_alert(repository: TradeJournalRepository, position_tic
         repository.record_heartbeat(session, "demo-position-manager", "ERROR", message)
 
 
+def _parse_time(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _is_market_closed_error(message: str) -> bool:
+    lowered = message.lower()
+    return "market closed" in lowered or "retcode=10018" in lowered
+
+
+def _set_market_closed_cooldown(memory: dict[str, object], error: str) -> None:
+    next_retry = datetime.now(UTC) + timedelta(minutes=get_settings().demo_position_market_closed_cooldown_minutes)
+    memory["status"] = STATE_MARKET_CLOSED_COOLDOWN
+    memory["latest_mt5_error"] = error
+    memory["cooldown_reason"] = "MARKET_CLOSED"
+    memory["next_retry_after"] = next_retry.isoformat()
+
+
+def _cooldown_active(memory: dict[str, object]) -> bool:
+    if memory.get("status") != STATE_MARKET_CLOSED_COOLDOWN:
+        return False
+    next_retry = _parse_time(memory.get("next_retry_after"))
+    return bool(next_retry and datetime.now(UTC) < next_retry)
+
+
 def _latched_close_reason(gateway: MetaTrader5Gateway, position: Mt5Position, memory: dict[str, object], repository: TradeJournalRepository) -> str | None:
-    if memory.get("status") in {STATE_EXIT_TRIGGERED, STATE_CLOSE_REQUEST_SENT, STATE_CLOSE_FAILED}:
+    if memory.get("status") in {STATE_EXIT_TRIGGERED, STATE_CLOSE_REQUEST_SENT, STATE_CLOSE_FAILED, STATE_MARKET_CLOSED_COOLDOWN}:
+        if _cooldown_active(memory):
+            return None
+        if memory.get("status") == STATE_MARKET_CLOSED_COOLDOWN:
+            memory["status"] = STATE_CLOSE_FAILED
         if memory.get("status") == STATE_CLOSE_FAILED:
-            last = memory.get("last_close_requested_at")
-            if last:
-                try:
-                    last_dt = datetime.fromisoformat(str(last))
-                    if (datetime.now(UTC) - last_dt).total_seconds() < get_settings().demo_position_failed_close_retry_seconds:
-                        return None
-                except ValueError:
-                    pass
+            last_dt = _parse_time(memory.get("last_close_requested_at"))
+            if last_dt and (datetime.now(UTC) - last_dt).total_seconds() < get_settings().demo_position_failed_close_retry_seconds:
+                return None
         return str(memory.get("pending_exit_reason") or "LATCHED_EXIT")
     reason = _close_reason(gateway, position, memory, repository)
     if reason is None:
@@ -368,6 +399,19 @@ def _close_and_confirm(
             memory["latest_mt5_error"] = latest_error
             memory["close_attempt_count"] = int(memory.get("close_attempt_count", 0)) + 1
             _record_manager_event(repository, "DEMO_POSITION_CLOSE_FAILED", _manager_payload(current, memory, reason, error=latest_error))
+            if _is_market_closed_error(latest_error):
+                _set_market_closed_cooldown(memory, latest_error)
+                _record_manager_event(
+                    repository,
+                    "MARKET_CLOSED_COOLDOWN",
+                    _manager_payload(current, memory, reason, error=latest_error, next_retry_after=memory.get("next_retry_after")),
+                )
+                _record_close_failure_alert(
+                    repository,
+                    position.ticket,
+                    f"Market is closed for {position.symbol} ticket {position.ticket}; close retries paused until {memory.get('next_retry_after')}.",
+                )
+                return False
         for _ in range(CLOSE_CONFIRM_POLLS):
             if _find_position(gateway, position.symbol, position.ticket) is None:
                 memory["status"] = STATE_CLOSE_CONFIRMED
@@ -432,6 +476,7 @@ def run_once() -> dict[str, int]:
                 f"/target={settings.demo_position_validation_target_usd if settings.demo_position_exit_policy == 'VALIDATION_FIXED_TARGET' else settings.demo_position_profit_target_usd}"
                 f"/reason={state.get(position.ticket, {}).get('pending_exit_reason', '-')}"
                 f"/floor={state.get(position.ticket, {}).get('trailing_floor', '-')}"
+                f"/nextRetry={state.get(position.ticket, {}).get('next_retry_after', '-')}"
                 f"/attempts={state.get(position.ticket, {}).get('close_attempt_count', 0)}"
                 for position in positions
             ]

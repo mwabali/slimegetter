@@ -175,6 +175,8 @@ class PositionDashboardItem(BaseModel):
     close_attempt_count: int = 0
     pending_exit_reason: str | None = None
     latest_mt5_error: str | None = None
+    cooldown_reason: str | None = None
+    next_retry_after: datetime | None = None
     execution_locked: bool = False
 
 
