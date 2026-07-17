@@ -26,6 +26,17 @@ $env:XAU_TRADING_MODE = "demo"
 $env:XAU_EXECUTION_ENABLED = "true"
 $env:XAU_DEMO_TRADING_CONFIRMED = "true"
 $env:XAU_KILL_SWITCH_ACTIVE = "false"
+$env:XAU_DEMO_ENTRY_ENABLED = "false"
+$env:XAU_DEMO_POSITION_MANAGER_ENABLED = "true"
+$env:XAU_DEMO_POSITION_POLL_SECONDS = "1"
+$env:XAU_DEMO_POSITION_PROFIT_TARGET_USD = "2.00"
+$env:XAU_DEMO_POSITION_TRAILING_ACTIVATION_USD = "0.50"
+$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_USD = "0.30"
+$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_PCT = "0.35"
+
+if ($env:XAU_EXECUTION_ENABLED -eq "true" -and $env:XAU_DEMO_POSITION_MANAGER_ENABLED -ne "true") {
+    throw "Refusing demo execution while XAU_DEMO_POSITION_MANAGER_ENABLED is not true."
+}
 
 function Test-Port([int]$Port) {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -48,10 +59,14 @@ if (Test-Port 8000) {
 }
 
 $workers = @{
-    demo = "app.workers.run_demo_loop"
     manager = "app.workers.run_demo_position_manager_loop"
     simulation = "app.workers.run_simulation_loop"
     strategy = "app.workers.run_strategy_shadow_loop"
+}
+if ($env:XAU_DEMO_ENTRY_ENABLED -eq "true") {
+    $workers.demo = "app.workers.run_demo_loop"
+} else {
+    Write-Host "Demo entry worker disabled for position-manager validation."
 }
 foreach ($name in $workers.Keys) {
     $module = $workers[$name]
@@ -73,5 +88,7 @@ $pids | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
 Start-Sleep -Seconds 3
 Start-Process "http://127.0.0.1:5173"
 Write-Host "Mission Control is starting in GUARDED DEMO EXECUTION MODE."
+Write-Host "Position manager: enabled=$env:XAU_DEMO_POSITION_MANAGER_ENABLED poll=${env:XAU_DEMO_POSITION_POLL_SECONDS}s profitTarget=$env:XAU_DEMO_POSITION_PROFIT_TARGET_USD trailingActivation=$env:XAU_DEMO_POSITION_TRAILING_ACTIVATION_USD givebackUsd=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_USD givebackPct=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_PCT"
+Write-Host "Demo entry worker enabled: $env:XAU_DEMO_ENTRY_ENABLED"
 Write-Host "Dashboard: http://127.0.0.1:5173"
 Write-Host "API health: http://127.0.0.1:8000/api/v1/health"

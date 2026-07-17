@@ -4,6 +4,7 @@ This module refuses live accounts and requires three independent configuration
 gates. It must only be launched after shadow and simulation verification.
 """
 import json
+import time
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from sqlalchemy import select
@@ -18,7 +19,7 @@ from app.domain.trading.models import PositionSizeResult, ProposalStatus, RiskPr
 from app.infrastructure.market_data.factory import build_economic_calendar_provider
 from app.infrastructure.mt5.gateway import MetaTrader5Gateway
 from app.infrastructure.persistence.database import SessionLocal
-from app.infrastructure.persistence.models import ExecutionAttemptRecord
+from app.infrastructure.persistence.models import AlertRecord, ExecutionAttemptRecord
 from app.workers.shadow_mode import ShadowModeRunner
 from app.workers.run_shadow_once import _collective_events
 
@@ -35,12 +36,39 @@ def _profile(settings) -> RiskProfile:
     )
 
 
+def _confirm_broker_protection(gateway: MetaTrader5Gateway, proposal, ticket: str) -> None:
+    """Demo fills must keep broker-side protection visible in MT5."""
+    matched_position = None
+    for _ in range(5):
+        positions = gateway.get_positions(proposal.symbol)
+        matched_position = next(
+            (
+                position for position in positions
+                if position.ticket == ticket or (position.side == proposal.side.value and position.volume == proposal.volume)
+            ),
+            None,
+        )
+        if matched_position is not None:
+            break
+        time.sleep(0.5)
+    if matched_position is None:
+        raise RuntimeError(f"Unable to confirm broker-side position protection after demo submit ticket={ticket}")
+    if matched_position.stop_loss is not None and matched_position.take_profit is not None:
+        return
+    close_ticket = gateway.close_position(matched_position, "xau-manager:missing-protection")
+    raise RuntimeError(
+        f"Demo position {matched_position.ticket} lacked broker SL/TP after entry; emergency close sent as {close_ticket}"
+    )
+
+
 def run_once() -> str:
     settings = get_settings()
     if settings.trading_mode != "demo":
         raise RuntimeError("Demo worker refuses non-demo trading mode")
     if not settings.execution_enabled or not settings.demo_trading_confirmed:
         raise RuntimeError("Demo execution requires XAU_EXECUTION_ENABLED and XAU_DEMO_TRADING_CONFIRMED")
+    if not settings.demo_entry_enabled:
+        raise RuntimeError("Demo entry worker disabled during position-manager validation")
     if settings.kill_switch_active:
         raise RuntimeError("Demo execution blocked by XAU_KILL_SWITCH_ACTIVE")
 
@@ -158,11 +186,14 @@ def run_once() -> str:
             session.commit()
         try:
             ticket = DemoExecutionService(gateway, True, "demo").submit(proposal, decision)
+            _confirm_broker_protection(gateway, proposal, ticket)
         except Exception as exc:
             with SessionLocal() as session:
                 attempt = session.scalar(select(ExecutionAttemptRecord).where(ExecutionAttemptRecord.proposal_id == proposal.id))
                 if attempt:
-                    attempt.status = "UNKNOWN_RECONCILE"; attempt.error_type = type(exc).__name__; session.commit()
+                    attempt.status = "UNKNOWN_RECONCILE"; attempt.error_type = type(exc).__name__
+                session.add(AlertRecord(severity="CRITICAL", message=f"Demo entry blocked pending broker reconciliation: {type(exc).__name__}"))
+                session.commit()
                 repository.append_event(session, proposal.correlation_id, "EXECUTION", "DEMO_ORDER_STATUS_UNKNOWN", {
                     "proposal_id": str(proposal.id), "error_type": type(exc).__name__,
                     "message": "Automatic retry blocked pending broker reconciliation",

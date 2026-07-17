@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     execution_enabled: bool = False
     trading_mode: Literal["demo", "live"] = "demo"
     demo_trading_confirmed: bool = False
+    demo_entry_enabled: bool = True
     kill_switch_active: bool = True
     max_tick_age_seconds: int = Field(default=15, ge=1, le=300)
     max_bar_age_seconds: int = Field(default=600, ge=60, le=3600)

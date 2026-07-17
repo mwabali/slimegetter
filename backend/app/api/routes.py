@@ -140,16 +140,19 @@ def system_status(session: Session = Depends(get_session)) -> SystemStatusRespon
         if simulation_seen.tzinfo is None: simulation_seen = simulation_seen.replace(tzinfo=UTC)
         simulation_age = (now - simulation_seen).total_seconds()
         simulation_worker = ServiceHealth(state=HealthState.HEALTHY if simulation_heartbeat.status == "HEALTHY" and simulation_age < 900 else HealthState.DEGRADED, message=simulation_heartbeat.message, checked_at=simulation_seen)
-    position_manager = ServiceHealth(state=HealthState.UNKNOWN, message="demo-position-manager has not reported", checked_at=now)
-    try:
-        position_heartbeat = _journal.latest_heartbeat(session, "demo-position-manager")
-    except SQLAlchemyError:
-        position_heartbeat = None
-    if position_heartbeat:
-        position_seen = position_heartbeat.last_seen_at
-        if position_seen.tzinfo is None: position_seen = position_seen.replace(tzinfo=UTC)
-        position_age = (now - position_seen).total_seconds()
-        position_manager = ServiceHealth(state=HealthState.HEALTHY if position_heartbeat.status == "HEALTHY" and position_age < 180 else HealthState.DEGRADED, message=position_heartbeat.message, checked_at=position_seen)
+    if not settings.demo_position_manager_enabled:
+        position_manager = ServiceHealth(state=HealthState.DISABLED, message="Demo position manager disabled by configuration", checked_at=now)
+    else:
+        position_manager = ServiceHealth(state=HealthState.UNKNOWN, message="demo-position-manager has not reported", checked_at=now)
+        try:
+            position_heartbeat = _journal.latest_heartbeat(session, "demo-position-manager")
+        except SQLAlchemyError:
+            position_heartbeat = None
+        if position_heartbeat:
+            position_seen = position_heartbeat.last_seen_at
+            if position_seen.tzinfo is None: position_seen = position_seen.replace(tzinfo=UTC)
+            position_age = (now - position_seen).total_seconds()
+            position_manager = ServiceHealth(state=HealthState.HEALTHY if position_heartbeat.status == "HEALTHY" and position_age < max(10, settings.demo_position_poll_seconds * 4) else HealthState.DEGRADED, message=position_heartbeat.message, checked_at=position_seen)
     free_disk_gb = shutil.disk_usage(".").free / (1024 ** 3)
     disk_health = ServiceHealth(state=HealthState.HEALTHY if free_disk_gb >= 1 else HealthState.DEGRADED, message=f"{free_disk_gb:.1f} GiB free", checked_at=now)
     levi_health = ServiceHealth(
