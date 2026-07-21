@@ -334,6 +334,7 @@ class MetaTrader5Gateway:
         base_request = {"action": self._mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(proposal.volume), "type": order_type, "price": float(price), "sl": float(proposal.stop_loss), "tp": float(proposal.take_profit), "deviation": 50, "magic": 260713, "comment": f"xau:{idempotency_key[:20]}", "type_time": self._mt5.ORDER_TIME_GTC}
         filling_modes = [self._mt5.ORDER_FILLING_IOC, self._mt5.ORDER_FILLING_FOK, self._mt5.ORDER_FILLING_RETURN]
         result = None
+        request_error: str | None = None
         for filling in filling_modes:
             result = self._mt5.order_send({**base_request, "type_filling": filling})
             if result is not None and result.retcode == self._mt5.TRADE_RETCODE_DONE:
@@ -378,6 +379,7 @@ class MetaTrader5Gateway:
             getattr(self._mt5, "TRADE_RETCODE_PLACED", self._mt5.TRADE_RETCODE_DONE),
         }
         result = None
+        request_error: str | None = None
         time_modes = (
             {
                 "type_time": self._mt5.ORDER_TIME_SPECIFIED,
@@ -385,17 +387,32 @@ class MetaTrader5Gateway:
             },
             {"type_time": self._mt5.ORDER_TIME_GTC},
         )
-        for time_mode in time_modes:
+        for mode_index, time_mode in enumerate(time_modes):
             for filling in (self._mt5.ORDER_FILLING_RETURN, self._mt5.ORDER_FILLING_IOC, self._mt5.ORDER_FILLING_FOK):
-                result = self._mt5.order_send({**request, **time_mode, "type_filling": filling})
+                try:
+                    result = self._mt5.order_send({**request, **time_mode, "type_filling": filling})
+                    request_error = None
+                except (KeyError, TypeError, ValueError) as exc:
+                    request_error = f"{type(exc).__name__}: {exc}"
+                    result = None
+                    if mode_index == 0 and "expiration" in str(exc).lower():
+                        break
+                    raise Mt5AdapterError(f"MT5 pending order request failed: {request_error}") from exc
                 if result is not None and result.retcode in accepted:
                     return str(result.order or result.deal)
                 comment_text = str(getattr(result, "comment", "")).lower() if result is not None else ""
                 if "unsupported filling" not in comment_text and "invalid filling" not in comment_text:
                     break
-            if result is None or getattr(result, "retcode", None) != 10022:
+            expiration_rejected = (
+                result is None
+                or getattr(result, "retcode", None) == 10022
+                or "expiration" in str(getattr(result, "comment", "")).lower()
+            )
+            if mode_index == 0 and expiration_rejected:
+                continue
+            if not expiration_rejected:
                 break
-        raise Mt5AdapterError(f"MT5 pending order rejected: retcode={getattr(result, 'retcode', 'none')} comment={getattr(result, 'comment', 'no result')} last_error={self._mt5.last_error()}")
+        raise Mt5AdapterError(f"MT5 pending order rejected: retcode={getattr(result, 'retcode', 'none')} comment={getattr(result, 'comment', request_error or 'no result')} last_error={self._mt5.last_error()}")
 
     def cancel_order(self, order: Mt5Order, comment: str) -> str:
         if not self._allow_orders or self._kill_switch(): raise ExecutionDisabledError("MT5 kill switch or order gate is active")

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
@@ -108,3 +108,52 @@ def test_sltp_request_uses_mt5_supported_fields_only() -> None:
     assert fake.request["position"] == 42
     assert "comment" not in fake.request
     assert "magic" not in fake.request
+
+
+def test_pending_order_falls_back_when_expiration_request_is_rejected() -> None:
+    class FakeMt5:
+        TRADE_ACTION_PENDING = 5
+        ORDER_TYPE_BUY_STOP = 4
+        ORDER_TYPE_SELL_STOP = 5
+        ORDER_FILLING_RETURN = 2
+        ORDER_FILLING_IOC = 1
+        ORDER_FILLING_FOK = 0
+        ORDER_TIME_SPECIFIED = 2
+        ORDER_TIME_GTC = 0
+        TRADE_RETCODE_DONE = 10009
+        TRADE_RETCODE_PLACED = 10008
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def symbol_info(self, symbol):
+            return SimpleNamespace(digits=2)
+
+        def symbol_select(self, symbol, enabled):
+            return True
+
+        def terminal_info(self):
+            return SimpleNamespace(trade_allowed=True, tradeapi_disabled=False)
+
+        def account_info(self):
+            return SimpleNamespace(trade_allowed=True, trade_expert=True)
+
+        def order_send(self, request):
+            self.requests.append(request)
+            if "expiration" in request:
+                return None
+            return SimpleNamespace(retcode=self.TRADE_RETCODE_PLACED, order=99, deal=0, comment="")
+
+        def last_error(self):
+            return (1, "Success")
+
+    fake = FakeMt5()
+    gateway = MetaTrader5Gateway(fake, allow_orders=True, kill_switch=lambda: False)
+    ticket = gateway.submit_pending_order(
+        proposal(), "BUY_STOP", "xau-avenger:FLASH:BUY", datetime.now(UTC) + timedelta(minutes=30)
+    )
+
+    assert ticket == "99"
+    assert len(fake.requests) == 2
+    assert "expiration" in fake.requests[0]
+    assert "expiration" not in fake.requests[1]

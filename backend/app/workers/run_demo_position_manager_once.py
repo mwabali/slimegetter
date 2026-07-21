@@ -79,6 +79,7 @@ def _update_position_memory(position: Mt5Position, state: dict[str, dict[str, ob
     current_profit = float(position.profit)
     record = state.setdefault(position.ticket, {
         "ticket": position.ticket,
+        "lifecycle_id": str(uuid4()),
         "symbol": position.symbol,
         "side": position.side,
         "status": STATE_OPEN,
@@ -362,6 +363,9 @@ def _manager_payload(position: Mt5Position, memory: dict[str, object], reason: s
         "open_profit_at_close_request": str(position.profit),
         "peak_profit_seen": str(memory.get("peak_profit")),
         "trough_profit_seen": str(memory.get("trough_profit")),
+        "lifecycle_id": memory.get("lifecycle_id"),
+        "protection_status": memory.get("protection_status", "BROKER_PROTECTED"),
+        "unprotected_profit_floor": memory.get("unprotected_profit_floor"),
         "age_minutes": round(_position_age_minutes(position), 2),
         "reason": reason,
         "status": memory.get("status"),
@@ -385,6 +389,21 @@ def _record_close_failure_alert(repository: TradeJournalRepository, position_tic
             message=message,
         )
         repository.record_heartbeat(session, "demo-position-manager", "ERROR", message)
+
+
+def _record_execution_incident(
+    incident_type: str,
+    position_ticket: str | None,
+    message: str,
+) -> None:
+    with SessionLocal() as session:
+        TradeJournalRepository().create_execution_incident(
+            session,
+            incident_type=incident_type,
+            severity="CRITICAL",
+            position_ticket=position_ticket,
+            message=message,
+        )
 
 
 def _is_managed_avenger_order(order: object) -> bool:
@@ -421,13 +440,19 @@ def _cancel_opposite_avenger_pending_orders(
                 },
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             _record_manager_event(
                 repository,
                 "AVENGER_PENDING_CANCEL_FAILED",
                 {
                     "order_ticket": getattr(order, "ticket", None),
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": error,
                 },
+            )
+            _record_execution_incident(
+                "PENDING_CANCEL_FAILED",
+                getattr(order, "ticket", None),
+                f"Managed Avenger pending-order cancellation failed for {getattr(order, 'ticket', None)}; new entries must remain blocked.",
             )
     return cancelled
 
