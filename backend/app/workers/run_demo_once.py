@@ -15,6 +15,7 @@ from app.agents.mikasa.models import TradingPermission
 from app.application.avenger import AvengerBracketBuilder
 from app.application.execution import DemoExecutionService
 from app.application.position_sizing import PositionSizer
+from app.application.session_controller import evaluate_session
 from app.application.workflows.decision_preview import DecisionPreview
 from app.config.settings import get_settings
 from app.domain.journal.repository import TradeJournalRepository
@@ -344,6 +345,17 @@ def run_once() -> str:
         raise RuntimeError("Demo entry worker disabled during position-manager validation")
     if settings.kill_switch_active:
         raise RuntimeError("Demo execution blocked by XAU_KILL_SWITCH_ACTIVE")
+
+    session_decision = evaluate_session()
+    if not session_decision.authorized:
+        with SessionLocal() as session:
+            TradeJournalRepository().record_heartbeat(
+                session,
+                "demo-worker",
+                "HEALTHY",
+                f"Session gate: {session_decision.state.value}; {session_decision.reason}",
+            )
+        return "NO_ORDER_SESSION_GATE"
 
     repository = TradeJournalRepository()
     with SessionLocal() as session:
