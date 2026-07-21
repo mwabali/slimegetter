@@ -24,3 +24,11 @@ def test_pre_window_checks_block_entry() -> None:
     )
     assert decision.state is SessionState.PRE_WINDOW_CHECK
     assert "broker trading permission" in decision.reason
+
+
+def test_demo_override_authorizes_outside_window(monkeypatch) -> None:
+    monkeypatch.setenv("XAU_DEMO_SESSION_OVERRIDE", "true")
+    decision = evaluate_session(datetime(2026, 7, 21, 10, 0, tzinfo=UTC))
+    assert decision.authorized is True
+    assert decision.window is not None
+    assert decision.window.key == "DEMO_OVERRIDE"

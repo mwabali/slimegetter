@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from enum import StrEnum
+import os
 from zoneinfo import ZoneInfo
 
 
@@ -71,6 +72,9 @@ def evaluate_session(
 ) -> SessionDecision:
     checked_at = current_eat(now_utc)
     window = active_window(now_utc)
+    demo_override = os.getenv("XAU_DEMO_SESSION_OVERRIDE", "false").lower() == "true"
+    if demo_override:
+        window = TradingWindow("DEMO_OVERRIDE", time(0, 0), time(23, 59, 59))
     if window is None:
         return SessionDecision(
             SessionState.COOLED_DOWN,
@@ -104,5 +108,9 @@ def evaluate_session(
         True,
         window,
         checked_at,
-        f"Authorized in recovered {window.key} window",
-    )
+            (
+                "Authorized by explicit demo-only session override"
+                if demo_override
+                else f"Authorized in recovered {window.key} window"
+            ),
+        )

@@ -13,6 +13,11 @@ Outside those windows the entry worker records `COOLED_DOWN` and submits no
 new order. The position manager remains independent so an existing protected
 position can still be managed and reconciled.
 
+For demo testing only, `XAU_DEMO_SESSION_OVERRIDE=true` authorizes the entry
+worker outside those windows. It does not bypass demo mode, broker protection,
+the one-position exposure gate, or risk checks. It must remain unset/false for
+normal session testing and is never valid for live execution.
+
 The report worker is separate from trading and uses only the journal database.
 It writes `reports/session/YYYY-MM-DD-window.json` and `.md` summaries for
 completed windows. Missing data is represented as `null`; the worker does not
