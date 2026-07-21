@@ -31,3 +31,13 @@ def test_entry_poll_interval_is_configurable(monkeypatch) -> None:
         assert get_settings().demo_entry_poll_seconds == 7
     finally:
         get_settings.cache_clear()
+
+
+def test_demo_exploration_floor_is_calibrated_and_opposite_exit_is_opt_in() -> None:
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.demo_exploration_min_market_quality == 4.0
+        assert settings.demo_position_close_on_opposite_signal is False
+    finally:
+        get_settings.cache_clear()

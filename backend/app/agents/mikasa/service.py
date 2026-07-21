@@ -39,7 +39,7 @@ class MikasaService:
             reasons.append(f"{market.session.value} is outside Erwin's configured trading sessions; Erwin will decide")
         reasons.extend(warnings)
         if observation_override:
-            reasons.append(f"TEMPORARY DEMO OBSERVATION OVERRIDE: threshold lowered to {minimum_quality}")
+            reasons.append(f"DEMO EXPLORATION FLOOR: {minimum_quality}; Mikasa remains advisory and Erwin/Avenger retain execution authority")
         legacy_permission = TradingPermission.ALLOW if is_session_allowed and market.spread <= max_spread and score >= minimum_quality else TradingPermission.WAIT
         if score < minimum_quality:
             reasons.append(f"Legacy threshold would WAIT below {minimum_quality}; advisory mode remains available")

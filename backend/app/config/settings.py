@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     observation_mode_until: datetime | None = None
     observation_min_market_quality: float = Field(default=4.0, ge=0, le=10)
     demo_exploration_enabled: bool = False
-    demo_exploration_min_market_quality: float = Field(default=0.0, ge=0, le=10)
+    # Calibrated to the observed 3.91-6.30 demo score distribution; 0.0 made
+    # exploration indistinguishable from an unbounded quality override.
+    demo_exploration_min_market_quality: float = Field(default=4.0, ge=0, le=10)
     demo_entry_poll_seconds: int = Field(default=5, ge=1, le=300)
     demo_position_manager_enabled: bool = False
     demo_position_poll_seconds: int = Field(default=5, ge=1, le=300)
@@ -60,7 +62,7 @@ class Settings(BaseSettings):
     demo_position_validation_target_usd: float = Field(default=2.00, ge=0)
     demo_position_profit_target_usd: float = Field(default=0.50, ge=0)
     demo_position_stop_loss_usd: float = Field(default=6.00, ge=0)
-    demo_position_close_on_opposite_signal: bool = True
+    demo_position_close_on_opposite_signal: bool = False
     demo_position_failed_close_retry_seconds: int = Field(default=60, ge=5, le=3600)
     demo_position_failed_protection_retry_seconds: int = Field(default=15, ge=1, le=3600)
     demo_position_market_closed_cooldown_minutes: int = Field(default=180, ge=1, le=4320)
