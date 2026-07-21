@@ -20,6 +20,7 @@ STATE_BREAKEVEN_CONFIRMED = "BREAKEVEN_CONFIRMED"
 STATE_PROFIT_LOCK_ARMED = "PROFIT_LOCK_ARMED"
 STATE_PROFIT_LOCK_CONFIRMED = "PROFIT_LOCK_CONFIRMED"
 STATE_TRAILING_ACTIVE = "TRAILING_ACTIVE"
+STATE_UNPROTECTED_PROFIT = "UNPROTECTED_PROFIT"
 STATE_EXIT_TRIGGERED = "EXIT_TRIGGERED"
 STATE_CLOSE_REQUEST_SENT = "CLOSE_REQUEST_SENT"
 STATE_MARKET_CLOSED_COOLDOWN = "MARKET_CLOSED_COOLDOWN"
@@ -38,6 +39,7 @@ PROTECTION_ORDER = {
     STATE_PROFIT_LOCK_ARMED: 4,
     STATE_PROFIT_LOCK_CONFIRMED: 5,
     STATE_TRAILING_ACTIVE: 6,
+    STATE_UNPROTECTED_PROFIT: 6,
     STATE_EXIT_TRIGGERED: 7,
     STATE_CLOSE_REQUEST_SENT: 8,
     STATE_MARKET_CLOSED_COOLDOWN: 8,
@@ -147,14 +149,24 @@ def _protective_stop_improves(position: Mt5Position, proposed_stop: Decimal, cur
 
 
 def _can_modify_sl(memory: dict[str, object]) -> bool:
-    last = memory.get("last_sl_modified_at")
-    if not last:
+    timestamps = [memory.get("last_sl_modified_at"), memory.get("last_sl_modify_requested_at")]
+    parsed = []
+    for value in timestamps:
+        if value:
+            try:
+                parsed.append(datetime.fromisoformat(str(value)))
+            except ValueError:
+                continue
+    if not parsed:
         return True
-    try:
-        last_dt = datetime.fromisoformat(str(last))
-    except ValueError:
-        return True
-    return (datetime.now(UTC) - last_dt).total_seconds() >= get_settings().demo_position_min_sl_modify_seconds
+    last_dt = max(parsed)
+    settings = get_settings()
+    interval = (
+        settings.demo_position_failed_protection_retry_seconds
+        if memory.get("protection_status") == STATE_UNPROTECTED_PROFIT
+        else settings.demo_position_min_sl_modify_seconds
+    )
+    return (datetime.now(UTC) - last_dt).total_seconds() >= interval
 
 
 def _modify_stop(
@@ -164,14 +176,17 @@ def _modify_stop(
     memory: dict[str, object],
     new_stop: Decimal,
     event_type: str,
-) -> Mt5Position:
+) -> Mt5Position | None:
     if not _can_modify_sl(memory) or not _protective_stop_improves(position, new_stop, position.stop_loss):
-        return position
+        return None
     memory["last_sl_modify_requested_at"] = datetime.now(UTC).isoformat()
     confirmed = gateway.modify_position_protection(position, new_stop, position.take_profit, f"xau-manager:{event_type}")
     memory["broker_stop_loss"] = str(confirmed.stop_loss)
     memory["broker_take_profit"] = str(confirmed.take_profit)
     memory["last_sl_modified_at"] = datetime.now(UTC).isoformat()
+    memory["protection_status"] = "BROKER_PROTECTED"
+    memory.pop("unprotected_profit_floor", None)
+    memory.pop("protection_retry_after", None)
     _record_manager_event(repository, event_type, _manager_payload(confirmed, memory, event_type, new_stop=str(new_stop)))
     return confirmed
 
@@ -186,6 +201,54 @@ def _allowed_giveback(memory: dict[str, object]) -> Decimal:
     )
 
 
+def _unprotected_profit_floor(memory: dict[str, object]) -> Decimal | None:
+    peak = Decimal(str(memory.get("peak_profit", 0)))
+    if peak <= 0:
+        return None
+    return max(Decimal("0"), peak - _allowed_giveback(memory))
+
+
+def _mark_protection_failure(
+    repository: TradeJournalRepository,
+    position: Mt5Position,
+    memory: dict[str, object],
+    event_type: str,
+    error: str,
+) -> None:
+    now = datetime.now(UTC)
+    memory["protection_status"] = STATE_UNPROTECTED_PROFIT
+    memory["protection_modify_failure_count"] = int(memory.get("protection_modify_failure_count", 0)) + 1
+    memory["last_protection_failure_at"] = now.isoformat()
+    memory["protection_retry_after"] = (now + timedelta(seconds=get_settings().demo_position_failed_protection_retry_seconds)).isoformat()
+    floor = _unprotected_profit_floor(memory)
+    if floor is not None:
+        memory["unprotected_profit_floor"] = str(floor)
+    payload = _manager_payload(
+        position,
+        memory,
+        event_type,
+        error=error,
+        protection_status=memory["protection_status"],
+        unprotected_profit_floor=memory.get("unprotected_profit_floor"),
+        protection_retry_after=memory.get("protection_retry_after"),
+    )
+    _record_manager_event(repository, event_type, payload)
+    with SessionLocal() as session:
+        repository.create_execution_incident(
+            session,
+            incident_type="PROTECTION_FAILED",
+            severity="CRITICAL",
+            position_ticket=position.ticket,
+            message=f"Broker-side protection failed for XAUUSD ticket {position.ticket}; new entries must remain blocked until resolved.",
+        )
+        repository.record_heartbeat(
+            session,
+            "demo-position-manager",
+            "ERROR",
+            f"Protection failed for {position.ticket}; fallback floor={memory.get('unprotected_profit_floor', '-')}",
+        )
+
+
 def _hybrid_close_reason(
     gateway: MetaTrader5Gateway,
     repository: TradeJournalRepository,
@@ -195,6 +258,10 @@ def _hybrid_close_reason(
     settings = get_settings()
     if position.stop_loss is None or position.take_profit is None:
         return "MISSING_BROKER_PROTECTION"
+    if memory.get("protection_status") == STATE_UNPROTECTED_PROFIT:
+        fallback_floor = Decimal(str(memory.get("unprotected_profit_floor", "0")))
+        if position.profit <= fallback_floor:
+            return "UNPROTECTED_PROFIT_FLOOR_BREACHED"
     age_minutes = _position_age_minutes(position)
     initial_risk = Decimal(str(memory.get("initial_risk_usd") or "0"))
     current_r = position.profit / initial_risk if initial_risk > 0 else Decimal("0")
@@ -203,12 +270,14 @@ def _hybrid_close_reason(
         _advance_state(memory, STATE_BREAKEVEN_ARMED)
         breakeven_stop = _profit_price(position, Decimal(str(settings.demo_position_breakeven_buffer_usd)))
         try:
-            position = _modify_stop(gateway, repository, position, memory, breakeven_stop, "BREAKEVEN_CONFIRMED")
-            _advance_state(memory, STATE_BREAKEVEN_CONFIRMED)
-            memory["breakeven_level"] = str(breakeven_stop)
+            updated = _modify_stop(gateway, repository, position, memory, breakeven_stop, "BREAKEVEN_CONFIRMED")
+            if updated is not None:
+                position = updated
+                _advance_state(memory, STATE_BREAKEVEN_CONFIRMED)
+                memory["breakeven_level"] = str(breakeven_stop)
         except Exception as exc:
             memory["latest_mt5_error"] = f"{type(exc).__name__}: {exc}"
-            _record_manager_event(repository, "BREAKEVEN_MODIFY_FAILED", _manager_payload(position, memory, "BREAKEVEN_MODIFY_FAILED", error=memory["latest_mt5_error"]))
+            _mark_protection_failure(repository, position, memory, "BREAKEVEN_MODIFY_FAILED", memory["latest_mt5_error"])
     lock_activation = Decimal(str(settings.demo_position_profit_lock_activation_usd))
     lock_profit = Decimal(str(settings.demo_position_profit_lock_usd))
     if position.profit >= lock_activation or (initial_risk > 0 and current_r >= Decimal(str(settings.demo_position_profit_lock_activation_r))):
@@ -216,11 +285,13 @@ def _hybrid_close_reason(
         lock_stop = _profit_price(position, lock_profit if initial_risk <= 0 else max(lock_profit, initial_risk * Decimal(str(settings.demo_position_profit_lock_r))))
         memory["locked_profit_floor"] = str(lock_profit)
         try:
-            position = _modify_stop(gateway, repository, position, memory, lock_stop, "PROFIT_LOCK_CONFIRMED")
-            _advance_state(memory, STATE_PROFIT_LOCK_CONFIRMED)
+            updated = _modify_stop(gateway, repository, position, memory, lock_stop, "PROFIT_LOCK_CONFIRMED")
+            if updated is not None:
+                position = updated
+                _advance_state(memory, STATE_PROFIT_LOCK_CONFIRMED)
         except Exception as exc:
             memory["latest_mt5_error"] = f"{type(exc).__name__}: {exc}"
-            _record_manager_event(repository, "PROFIT_LOCK_MODIFY_FAILED", _manager_payload(position, memory, "PROFIT_LOCK_MODIFY_FAILED", error=memory["latest_mt5_error"]))
+            _mark_protection_failure(repository, position, memory, "PROFIT_LOCK_MODIFY_FAILED", memory["latest_mt5_error"])
     peak_profit = Decimal(str(memory.get("peak_profit", position.profit)))
     trailing_ready = (
         int(memory.get("observations", 0)) >= settings.demo_position_min_trailing_observations

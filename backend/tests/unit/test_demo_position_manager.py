@@ -191,6 +191,25 @@ def test_hybrid_closes_when_trailing_floor_is_breached(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
+def test_failed_profit_protection_sets_floor_and_retries_are_throttled(monkeypatch) -> None:
+    configure_manager(monkeypatch, policy="HYBRID_PROFIT_PROTECTION")
+    monkeypatch.setenv("XAU_DEMO_POSITION_FAILED_PROTECTION_RETRY_SECONDS", "30")
+    get_settings.cache_clear()
+    memory = {
+        "peak_profit": 2.0,
+        "trough_profit": -0.2,
+        "observations": 5,
+        "protection_status": manager.STATE_UNPROTECTED_PROFIT,
+        "last_sl_modify_requested_at": datetime.now(UTC).isoformat(),
+        "unprotected_profit_floor": "1.30",
+    }
+    try:
+        assert manager._can_modify_sl(memory) is False
+        assert manager._close_reason(StaticGateway(()), position(profit="1.29"), memory, object()) == "UNPROTECTED_PROFIT_FLOOR_BREACHED"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_failed_close_retry_is_throttled(monkeypatch) -> None:
     configure_manager(monkeypatch)
     memory = {
