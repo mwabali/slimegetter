@@ -45,6 +45,28 @@ HISTORICAL_WINDOWS = (
 )
 
 
+def configured_windows() -> tuple[TradingWindow, ...]:
+    """Return an optional demo-only schedule without changing production defaults."""
+    raw = os.getenv("XAU_DEMO_SESSION_WINDOWS", "").strip()
+    if not raw:
+        return HISTORICAL_WINDOWS
+    windows: list[TradingWindow] = []
+    try:
+        for item in raw.split(","):
+            start_text, end_text = (part.strip() for part in item.split("-", 1))
+            start = time.fromisoformat(start_text)
+            end = time.fromisoformat(end_text)
+            if start >= end:
+                raise ValueError("window must not cross midnight or be empty")
+            key = f"DEMO_{start.strftime('%H%M')}_{end.strftime('%H%M')}"
+            windows.append(TradingWindow(key, start, end))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Invalid XAU_DEMO_SESSION_WINDOWS; expected HH:MM-HH:MM entries") from exc
+    if not windows:
+        raise RuntimeError("XAU_DEMO_SESSION_WINDOWS must contain at least one window")
+    return tuple(windows)
+
+
 def current_eat(now_utc: datetime | None = None) -> datetime:
     value = now_utc or datetime.now(UTC)
     if value.tzinfo is None:
@@ -54,7 +76,7 @@ def current_eat(now_utc: datetime | None = None) -> datetime:
 
 def active_window(now_utc: datetime | None = None) -> TradingWindow | None:
     local = current_eat(now_utc)
-    return next((window for window in HISTORICAL_WINDOWS if window.contains(local.time())), None)
+    return next((window for window in configured_windows() if window.contains(local.time())), None)
 
 
 def evaluate_session(

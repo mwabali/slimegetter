@@ -32,3 +32,11 @@ def test_demo_override_authorizes_outside_window(monkeypatch) -> None:
     assert decision.authorized is True
     assert decision.window is not None
     assert decision.window.key == "DEMO_OVERRIDE"
+
+
+def test_demo_schedule_can_be_configured_for_a_test_day(monkeypatch) -> None:
+    monkeypatch.setenv("XAU_DEMO_SESSION_WINDOWS", "03:00-06:00,06:00-08:00,10:00-12:00,14:00-17:00")
+    decision = evaluate_session(datetime(2026, 7, 21, 4, 0, tzinfo=UTC))
+    assert decision.authorized is True
+    assert decision.window is not None
+    assert decision.window.key == "DEMO_0600_0800"
