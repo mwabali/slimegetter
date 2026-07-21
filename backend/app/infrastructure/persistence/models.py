@@ -52,6 +52,14 @@ class ClosedTradeRecord(Base):
     exit_r: Mapped[float | None] = mapped_column(Numeric(12, 4))
     peak_r: Mapped[float | None] = mapped_column(Numeric(12, 4))
     exit_policy_version: Mapped[str | None] = mapped_column(String(64))
+    normal_volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    approved_volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    risk_multiplier: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    risk_state: Mapped[str | None] = mapped_column(String(16))
+    risk_state_reason: Mapped[str | None] = mapped_column(Text)
+    adaptive_recommended_volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    adaptive_sizing_mode: Mapped[str | None] = mapped_column(String(16))
+    estimated_counterfactual_pnl: Mapped[float | None] = mapped_column(Numeric(16, 2))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -123,6 +131,7 @@ class FillRecord(Base):
     profit: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False)
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     entry: Mapped[str] = mapped_column(String(16), nullable=False, default="IN")
+    position_ticket: Mapped[str | None] = mapped_column(String(64), index=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
@@ -187,5 +196,43 @@ class ExecutionAttemptRecord(Base):
     initial_risk_usd: Mapped[float | None] = mapped_column(Numeric(16, 2))
     intended_reward_risk: Mapped[float | None] = mapped_column(Numeric(8, 4))
     volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    normal_volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    approved_volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    risk_multiplier: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    risk_state: Mapped[str | None] = mapped_column(String(16))
+    risk_state_reason: Mapped[str | None] = mapped_column(Text)
+    adaptive_recommended_volume: Mapped[float | None] = mapped_column(Numeric(16, 4))
+    adaptive_sizing_mode: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DefensiveRiskStateRecord(Base):
+    """Durable XAUUSD demo risk state; restart must not erase defensive posture."""
+    __tablename__ = "defensive_risk_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    session_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    current_risk_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    risk_multiplier: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False)
+    consecutive_losses: Mapped[int] = mapped_column(nullable=False, default=0)
+    hard_stop_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    consecutive_hard_stops: Mapped[int] = mapped_column(nullable=False, default=0)
+    session_start_balance: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False)
+    current_balance: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False)
+    session_realized_pnl: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False, default=0)
+    session_drawdown_usd: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False, default=0)
+    session_drawdown_pct: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False, default=0)
+    peak_session_equity: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False)
+    current_equity: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False)
+    equity_drawdown_usd: Mapped[float] = mapped_column(Numeric(16, 2), nullable=False, default=0)
+    equity_drawdown_pct: Mapped[float] = mapped_column(Numeric(8, 4), nullable=False, default=0)
+    recent_average_loss: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    recent_average_win: Mapped[float | None] = mapped_column(Numeric(16, 2))
+    recent_profit_factor: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    recovery_wins: Mapped[int] = mapped_column(nullable=False, default=0)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    state_entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

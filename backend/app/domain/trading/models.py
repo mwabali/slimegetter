@@ -133,6 +133,7 @@ class SymbolSpecification(BaseModel):
     volume_min: Decimal = Field(gt=0)
     volume_max: Decimal = Field(gt=0)
     volume_step: Decimal = Field(gt=0)
+    volume_limit: Decimal | None = Field(default=None, gt=0)
     trade_contract_size: Decimal = Field(gt=0)
 
 

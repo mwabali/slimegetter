@@ -5,6 +5,7 @@ gates. It must only be launched after shadow and simulation verification.
 """
 import json
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 from sqlalchemy import select
@@ -12,7 +13,17 @@ from sqlalchemy import select
 from app.agents.erwin.service import CommanderErwinService
 from app.agents.annie.models import NewsRiskStatus
 from app.agents.mikasa.models import TradingPermission
-from app.application.avenger import AvengerBracketBuilder
+from app.application.avenger import AvengerBracketBuilder, PendingOrderPlan
+from app.application.defensive_risk import (
+    DefensiveRiskEngine,
+    DefensiveRiskUnavailable,
+    DefensiveVolumeBlocked,
+    DefensiveVolumeDecision,
+    RiskSizingMode,
+    RiskStateAssessment,
+    calculate_allowed_volume,
+    configured_normal_volume,
+)
 from app.application.execution import DemoExecutionService
 from app.application.position_sizing import PositionSizer
 from app.application.session_controller import evaluate_session
@@ -76,7 +87,14 @@ def _managed_avenger_orders(gateway: MetaTrader5Gateway) -> tuple:
     )
 
 
-def _record_avenger_attempt(session, proposal, ticket: str, risk_amount: Decimal) -> None:
+def _record_avenger_attempt(
+    session,
+    proposal,
+    ticket: str,
+    risk_amount: Decimal,
+    sizing: DefensiveVolumeDecision,
+    assessment: RiskStateAssessment,
+) -> None:
     attempt = session.scalar(
         select(ExecutionAttemptRecord).where(ExecutionAttemptRecord.proposal_id == proposal.id)
     )
@@ -90,6 +108,13 @@ def _record_avenger_attempt(session, proposal, ticket: str, risk_amount: Decimal
         attempt.initial_risk_usd = risk_amount
         attempt.intended_reward_risk = proposal.reward_risk_ratio()
         attempt.volume = proposal.volume
+        attempt.normal_volume = sizing.normal_volume
+        attempt.approved_volume = sizing.approved_volume
+        attempt.risk_multiplier = sizing.risk_multiplier
+        attempt.risk_state = assessment.state.value
+        attempt.risk_state_reason = assessment.state_reason
+        attempt.adaptive_recommended_volume = sizing.adaptive_recommended_volume
+        attempt.adaptive_sizing_mode = sizing.mode.value
 
 
 def _run_avenger_bracket(
@@ -165,8 +190,11 @@ def _run_avenger_bracket(
                     "Avenger bracket skipped: exposure already active",
                 )
             return "NO_ORDER_ACTIVE_EXPOSURE"
-        with SessionLocal() as session:
-            execution_locked = repository.has_critical_execution_incident(session)
+        raw_specification = gateway.get_symbol_specification("XAUUSD")
+        specification = _symbol_specification(raw_specification)
+        risk_assessment, execution_locked = _refresh_defensive_risk(account, repository)
+        sizing_mode = RiskSizingMode(settings.risk_sizing_mode)
+        effective_risk = None if sizing_mode is RiskSizingMode.OFF else risk_assessment
         plan = AvengerBracketBuilder().build(
             preview.market,
             settings,
@@ -176,10 +204,20 @@ def _run_avenger_bracket(
         spread = plan.spread
         erwin = CommanderErwinService()
         buy_decision = erwin.evaluate(
-            plan.buy.proposal, account, profile, spread, execution_locked=execution_locked
+            plan.buy.proposal,
+            account,
+            profile,
+            spread,
+            execution_locked=execution_locked,
+            defensive_risk=effective_risk,
         )
         sell_decision = erwin.evaluate(
-            plan.sell.proposal, account, profile, spread, execution_locked=execution_locked
+            plan.sell.proposal,
+            account,
+            profile,
+            spread,
+            execution_locked=execution_locked,
+            defensive_risk=effective_risk,
         )
         with SessionLocal() as session:
             repository.record_preview(session, preview)
@@ -189,6 +227,21 @@ def _run_avenger_bracket(
                 (
                     (
                         6,
+                        "DEFENSIVE_RISK",
+                        "DEFENSIVE_RISK_STATE",
+                        json.dumps({
+                            "risk_state": risk_assessment.state.value,
+                            "risk_multiplier": str(risk_assessment.risk_multiplier),
+                            "consecutive_losses": risk_assessment.consecutive_losses,
+                            "consecutive_hard_stops": risk_assessment.consecutive_hard_stops,
+                            "session_drawdown_pct": str(risk_assessment.session_drawdown_pct),
+                            "equity_drawdown_pct": str(risk_assessment.equity_drawdown_pct),
+                            "state_reason": risk_assessment.state_reason,
+                            "sizing_mode": sizing_mode.value,
+                        }),
+                    ),
+                    (
+                        7,
                         "EREN",
                         "AVENGER_BRACKET_PROPOSAL",
                         json.dumps(
@@ -205,13 +258,13 @@ def _run_avenger_bracket(
                         ),
                     ),
                     (
-                        7,
+                        8,
                         "COMMANDER_ERWIN",
                         "AVENGER_BUY_RISK_DECISION",
                         buy_decision.model_dump_json(),
                     ),
                     (
-                        8,
+                        9,
                         "COMMANDER_ERWIN",
                         "AVENGER_SELL_RISK_DECISION",
                         sell_decision.model_dump_json(),
@@ -228,7 +281,7 @@ def _run_avenger_bracket(
                     preview.correlation_id,
                     (
                         (
-                            9,
+                            11,
                             "EXECUTION",
                             "NO_ORDER",
                             json.dumps(
@@ -244,6 +297,38 @@ def _run_avenger_bracket(
                     "Erwin rejected Avenger bracket; no pending orders",
                 )
             return "NO_ORDER"
+        try:
+            sizing = calculate_allowed_volume(
+                configured_normal_volume(settings),
+                plan.buy.proposal.volume,
+                risk_assessment,
+                specification,
+                sizing_mode,
+            )
+        except DefensiveVolumeBlocked as exc:
+            with SessionLocal() as session:
+                repository.record_collective_events(
+                    session,
+                    preview.correlation_id,
+                    ((11, "DEFENSIVE_RISK", "DEFENSIVE_VOLUME_BLOCKED", json.dumps({"error": str(exc), "risk_state": risk_assessment.state.value})),),
+                )
+                repository.record_heartbeat(session, "demo-worker", "HEALTHY", f"Defensive sizing blocked Avenger bracket: {exc}")
+            return "NO_ORDER_DEFENSIVE_RISK"
+        if sizing.approved_volume is None:
+            raise DefensiveRiskUnavailable("Defensive sizing returned no approved volume")
+        if sizing.approved_volume != plan.buy.proposal.volume:
+            def apply_volume(leg: PendingOrderPlan):
+                proposal = leg.proposal
+                factor = sizing.approved_volume / proposal.volume
+                return replace(
+                    leg,
+                    proposal=proposal.model_copy(update={
+                        "volume": sizing.approved_volume,
+                        "expected_risk_pct": (proposal.expected_risk_pct * factor).quantize(Decimal("0.0001")),
+                        "reasons": (*proposal.reasons, f"Defensive sizing approved {sizing.approved_volume} volume in {risk_assessment.state.value}"),
+                    }),
+                )
+            plan = replace(plan, buy=apply_volume(plan.buy), sell=apply_volume(plan.sell))
         risk_amount = account.equity * profile.risk_per_trade_pct / Decimal("100")
         with SessionLocal() as session:
             for proposal in (plan.buy.proposal, plan.sell.proposal):
@@ -302,15 +387,15 @@ def _run_avenger_bracket(
             raise
         buy_ticket, sell_ticket = tickets.split(",", 1)
         with SessionLocal() as session:
-            _record_avenger_attempt(session, plan.buy.proposal, buy_ticket, risk_amount)
-            _record_avenger_attempt(session, plan.sell.proposal, sell_ticket, risk_amount)
+            _record_avenger_attempt(session, plan.buy.proposal, buy_ticket, risk_amount, sizing, risk_assessment)
+            _record_avenger_attempt(session, plan.sell.proposal, sell_ticket, risk_amount, sizing, risk_assessment)
             session.commit()
             repository.record_collective_events(
                 session,
                 preview.correlation_id,
                 (
                     (
-                        9,
+                        10,
                         "EXECUTION",
                         "AVENGER_BRACKET_SUBMITTED",
                         json.dumps(
@@ -322,6 +407,7 @@ def _run_avenger_bracket(
                                     "TradingBot Master Avenger pending "
                                     "buy-stop/sell-stop bracket"
                                 ),
+                                "defensive_sizing": _sizing_payload(sizing, risk_assessment),
                             }
                         ),
                     ),
@@ -380,6 +466,54 @@ def run_once() -> str:
         exploration_trade_when_flat=exploration_active,
     )
 
+
+def _symbol_specification(raw: object) -> SymbolSpecification:
+    raw_limit = Decimal(str(getattr(raw, "volume_limit", 0) or 0))
+    return SymbolSpecification(
+        symbol=str(getattr(raw, "name", "XAUUSD")),
+        point=Decimal(str(getattr(raw, "point", 0.01))),
+        volume_min=Decimal(str(getattr(raw, "volume_min"))),
+        volume_max=Decimal(str(getattr(raw, "volume_max"))),
+        volume_step=Decimal(str(getattr(raw, "volume_step"))),
+        volume_limit=raw_limit if raw_limit > 0 else None,
+        trade_contract_size=Decimal(str(getattr(raw, "trade_contract_size"))),
+    )
+
+
+def _refresh_defensive_risk(
+    account,
+    repository: TradeJournalRepository,
+) -> tuple[RiskStateAssessment, bool]:
+    with SessionLocal() as session:
+        execution_locked = repository.has_critical_execution_incident(session)
+        try:
+            assessment = DefensiveRiskEngine().refresh(session, account, execution_locked=execution_locked)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            repository.record_heartbeat(session, "demo-worker", "ERROR", f"Defensive risk state unavailable: {type(exc).__name__}")
+            raise DefensiveRiskUnavailable(f"Defensive risk state unavailable: {type(exc).__name__}") from exc
+    return assessment, execution_locked
+
+
+def _sizing_payload(decision: DefensiveVolumeDecision, assessment: RiskStateAssessment) -> dict[str, object]:
+    return {
+        "normal_volume": str(decision.normal_volume),
+        "candidate_volume": str(decision.candidate_volume),
+        "calculated_volume": str(decision.calculated_volume),
+        "adaptive_recommended_volume": str(decision.adaptive_recommended_volume) if decision.adaptive_recommended_volume is not None else None,
+        "approved_volume": str(decision.approved_volume) if decision.approved_volume is not None else None,
+        "risk_multiplier": str(decision.risk_multiplier),
+        "risk_state": assessment.state.value,
+        "risk_state_reason": assessment.state_reason,
+        "sizing_mode": decision.mode.value,
+        "broker_minimum": str(decision.broker_minimum),
+        "broker_maximum": str(decision.broker_maximum),
+        "broker_step": str(decision.broker_step),
+        "broker_volume_limit": str(decision.broker_volume_limit) if decision.broker_volume_limit is not None else None,
+        "reason": decision.reason,
+    }
+
     if settings.demo_strategy_engine == "AVENGER_STRADDLE":
         return _run_avenger_bracket(preview, gateway, profile, settings, repository)
 
@@ -397,13 +531,10 @@ def run_once() -> str:
     try:
         account = gateway.get_account_snapshot()
         raw = gateway.get_symbol_specification("XAUUSD")
-        specification = SymbolSpecification(
-            point=Decimal(str(raw.point)),
-            volume_min=Decimal(str(raw.volume_min)),
-            volume_max=Decimal(str(raw.volume_max)),
-            volume_step=Decimal(str(raw.volume_step)),
-            trade_contract_size=Decimal(str(raw.trade_contract_size)),
-        )
+        specification = _symbol_specification(raw)
+        risk_assessment, execution_locked = _refresh_defensive_risk(account, repository)
+        sizing_mode = RiskSizingMode(settings.risk_sizing_mode)
+        effective_risk = None if sizing_mode is RiskSizingMode.OFF else risk_assessment
         try:
             sized = PositionSizer().size(preview.eren, account.equity, specification)
             proposal = preview.eren.model_copy(update={"volume": sized.volume})
@@ -419,10 +550,15 @@ def run_once() -> str:
                 "expected_risk_pct": actual_risk_pct,
                 "reasons": (*preview.eren.reasons, "Demo exploration used broker-minimum volume so the bot can collect real execution evidence"),
             })
-        with SessionLocal() as session:
-            execution_locked = repository.has_critical_execution_incident(session)
         tick = gateway.get_tick("XAUUSD")
-        decision = CommanderErwinService().evaluate(proposal, account, profile, tick.ask - tick.bid, execution_locked=execution_locked)
+        decision = CommanderErwinService().evaluate(
+            proposal,
+            account,
+            profile,
+            tick.ask - tick.bid,
+            execution_locked=execution_locked,
+            defensive_risk=effective_risk,
+        )
         if decision.status is ProposalStatus.APPROVED and decision.recommended_size_multiplier < Decimal("1"):
             raw_volume = proposal.volume * decision.recommended_size_multiplier
             adjusted_volume = (raw_volume / specification.volume_step).to_integral_value(rounding=ROUND_DOWN) * specification.volume_step
@@ -448,6 +584,35 @@ def run_once() -> str:
                     "expected_risk_pct": proposal.expected_risk_pct * decision.recommended_size_multiplier,
                     "reasons": (*proposal.reasons, f"Erwin committed {decision.recommended_size_multiplier * 100}% calculated-risk size"),
                 })
+        try:
+            sizing = calculate_allowed_volume(
+                configured_normal_volume(settings),
+                proposal.volume,
+                risk_assessment,
+                specification,
+                sizing_mode,
+            )
+        except DefensiveVolumeBlocked as exc:
+            with SessionLocal() as session:
+                repository.record_preview(session, preview)
+                repository.append_event(
+                    session,
+                    proposal.correlation_id,
+                    "DEFENSIVE_RISK",
+                    "DEFENSIVE_VOLUME_BLOCKED",
+                    {"error": str(exc), "risk_state": risk_assessment.state.value},
+                )
+                repository.record_heartbeat(session, "demo-worker", "HEALTHY", f"Defensive sizing blocked order: {exc}")
+            return "NO_ORDER_DEFENSIVE_RISK"
+        if sizing.approved_volume is None:
+            raise DefensiveRiskUnavailable("Defensive sizing returned no approved volume")
+        if sizing.approved_volume != proposal.volume:
+            factor = sizing.approved_volume / proposal.volume
+            proposal = proposal.model_copy(update={
+                "volume": sizing.approved_volume,
+                "expected_risk_pct": (proposal.expected_risk_pct * factor).quantize(Decimal("0.0001")),
+                "reasons": (*proposal.reasons, f"Defensive sizing approved {sizing.approved_volume} volume in {risk_assessment.state.value}"),
+            })
         safe_preview = preview.model_copy(update={
             "eren": proposal,
             "erwin": decision,
@@ -510,9 +675,16 @@ def run_once() -> str:
                 attempt.initial_risk_usd = sized.risk_amount
                 attempt.intended_reward_risk = proposal.reward_risk_ratio()
                 attempt.volume = proposal.volume
+                attempt.normal_volume = sizing.normal_volume
+                attempt.approved_volume = sizing.approved_volume
+                attempt.risk_multiplier = sizing.risk_multiplier
+                attempt.risk_state = risk_assessment.state.value
+                attempt.risk_state_reason = risk_assessment.state_reason
+                attempt.adaptive_recommended_volume = sizing.adaptive_recommended_volume
+                attempt.adaptive_sizing_mode = sizing.mode.value
                 session.commit()
         with SessionLocal() as session:
-            repository.record_collective_events(session, proposal.correlation_id, ((6, "EXECUTION", "DEMO_ORDER_SUBMITTED", json.dumps({"ticket": ticket, "volume": str(sized.volume), "risk_amount": str(sized.risk_amount)})),))
+            repository.record_collective_events(session, proposal.correlation_id, ((6, "EXECUTION", "DEMO_ORDER_SUBMITTED", json.dumps({"ticket": ticket, "volume": str(proposal.volume), "risk_amount": str(sized.risk_amount), "defensive_sizing": _sizing_payload(sizing, risk_assessment)})),))
             collective = _collective_events(session, proposal.correlation_id, safe_preview.final_message, 7)
             session.rollback()
             repository.record_collective_events(session, proposal.correlation_id, collective)

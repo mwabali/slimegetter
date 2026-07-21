@@ -34,6 +34,7 @@ class Mt5ReadOnlySynchronizer:
                     deal_ticket=fill.deal_ticket, order_ticket=fill.order_ticket,
                     symbol=fill.symbol, side=fill.side, volume=fill.volume, price=fill.price,
                     profit=fill.profit, filled_at=fill.filled_at, entry=fill.entry,
+                    position_ticket=fill.position_ticket,
                     synced_at=datetime.now(UTC),
                 )
             )

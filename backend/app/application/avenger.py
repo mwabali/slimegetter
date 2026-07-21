@@ -50,7 +50,7 @@ class AvengerBracketBuilder:
         spread_buffer = market.spread * Decimal(str(settings.avenger_trigger_spread_multiplier))
         minimum_trigger = Decimal(str(settings.avenger_min_effective_trigger_price))
         effective_trigger = max(profile.trigger, spread_buffer, minimum_trigger)
-        volume = Decimal(str(settings.avenger_volume))
+        volume = Decimal(str(settings.risk_normal_volume or settings.avenger_volume))
         expires_at = datetime.now(UTC) + timedelta(
             minutes=settings.avenger_pending_expiration_minutes
         )

@@ -80,6 +80,7 @@ class Mt5Fill:
     profit: Decimal
     filled_at: datetime
     entry: str = "IN"
+    position_ticket: str | None = None
 
 
 class DisabledMt5Gateway:
@@ -200,7 +201,8 @@ class MetaTrader5Gateway:
         return AccountSnapshot(account_id=str(info.login), balance=Decimal(str(info.balance)), equity=Decimal(str(info.equity)), free_margin=Decimal(str(info.margin_free)), used_margin=Decimal(str(info.margin)), margin_level=Decimal(str(info.margin_level)), floating_pnl=Decimal(str(info.profit)), currency=str(info.currency), leverage=int(info.leverage), open_position_count=len(positions), current_exposure_pct=Decimal("0"), realized_daily_pnl=daily_pnl, realized_weekly_pnl=weekly_pnl)
 
     def get_symbol_specification(self, symbol: str) -> object:
-        info = self._mt5.symbol_info(symbol)
+        resolved = self._resolve_symbol(symbol)
+        info = self._mt5.symbol_info(resolved)
         if info is None: raise Mt5AdapterError(f"Symbol unavailable: {symbol}")
         return info
 
@@ -315,6 +317,7 @@ class MetaTrader5Gateway:
                 volume=Decimal(str(row.volume)), price=Decimal(str(row.price)),
                 profit=Decimal(str(row.profit)), filled_at=datetime.fromtimestamp(int(row.time), UTC),
                 entry=entry_names.get(getattr(row, "entry", 0), "IN"),
+                position_ticket=str(getattr(row, "position_id", 0)) if getattr(row, "position_id", 0) else None,
             )
             for row in rows if getattr(row, "symbol", "")
         )

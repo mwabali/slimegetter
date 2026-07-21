@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from app.domain.trading.models import AccountSnapshot, ProposalStatus, RiskDecision, RiskProfile, Side, TradeProposal
+from app.application.defensive_risk import RiskState, RiskStateAssessment
 
 
 class CommanderErwinService:
@@ -18,12 +19,26 @@ class CommanderErwinService:
         profile: RiskProfile,
         current_spread: Decimal,
         execution_locked: bool = False,
+        defensive_risk: RiskStateAssessment | None = None,
     ) -> RiskDecision:
         survival_rejections: list[str] = []
         accepted_warnings: list[str] = []
         size_multiplier = Decimal("1.00")
         if execution_locked:
             survival_rejections.append("Execution locked: unresolved critical broker incident requires human resolution")
+        if defensive_risk is not None:
+            if defensive_risk.state in {RiskState.HALTED, RiskState.UNKNOWN}:
+                survival_rejections.append(
+                    f"Defensive risk state {defensive_risk.state.value}: {defensive_risk.state_reason}"
+                )
+            elif defensive_risk.new_entries_blocked:
+                survival_rejections.append(
+                    f"Defensive risk cooldown active until {defensive_risk.cooldown_until}"
+                )
+            elif defensive_risk.risk_multiplier < Decimal("1"):
+                accepted_warnings.append(
+                    f"Defensive risk state {defensive_risk.state.value} will limit new volume to {defensive_risk.risk_multiplier}x before submission"
+                )
         if proposal.session not in profile.allowed_sessions:
             accepted_warnings.append(f"Session {proposal.session} is outside the preferred campaign window")
             size_multiplier *= Decimal("0.60")
