@@ -22,3 +22,12 @@ def test_kill_switch_defaults_active() -> None:
         assert get_settings().kill_switch_active is True
     finally:
         get_settings.cache_clear()
+
+
+def test_entry_poll_interval_is_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("XAU_DEMO_ENTRY_POLL_SECONDS", "7")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().demo_entry_poll_seconds == 7
+    finally:
+        get_settings.cache_clear()

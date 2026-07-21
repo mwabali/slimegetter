@@ -138,6 +138,9 @@ def test_close_is_confirmed_only_after_position_disappears(monkeypatch) -> None:
     memory = {"status": manager.STATE_EXIT_TRIGGERED, "pending_exit_reason": "LEARNING_PROFIT_TARGET", "peak_profit": 2.1}
     assert manager._close_and_confirm(gateway, object(), open_position, memory, "LEARNING_PROFIT_TARGET") is True
     assert memory["status"] == manager.STATE_CLOSE_CONFIRMED
+    assert memory["close_request_started_at"]
+    assert memory["close_request_sent_at"]
+    assert memory["close_confirmation_latency_ms"] >= 0
 
 
 def test_close_failure_remains_latched_when_position_stays_open(monkeypatch) -> None:

@@ -366,6 +366,10 @@ def _manager_payload(position: Mt5Position, memory: dict[str, object], reason: s
         "lifecycle_id": memory.get("lifecycle_id"),
         "protection_status": memory.get("protection_status", "BROKER_PROTECTED"),
         "unprotected_profit_floor": memory.get("unprotected_profit_floor"),
+        "close_request_started_at": memory.get("close_request_started_at"),
+        "close_request_sent_at": memory.get("close_request_sent_at"),
+        "close_confirmed_at": memory.get("confirmed_at"),
+        "close_confirmation_latency_ms": memory.get("close_confirmation_latency_ms"),
         "age_minutes": round(_position_age_minutes(position), 2),
         "reason": reason,
         "status": memory.get("status"),
@@ -516,18 +520,24 @@ def _close_and_confirm(
     memory: dict[str, object],
     reason: str,
 ) -> bool:
+    request_started = datetime.now(UTC)
     memory["status"] = STATE_CLOSE_REQUEST_SENT
-    memory["last_close_requested_at"] = datetime.now(UTC).isoformat()
+    memory["close_request_started_at"] = request_started.isoformat()
+    memory["last_close_requested_at"] = request_started.isoformat()
     latest_error = None
     for _ in range(CLOSE_RETRY_ATTEMPTS):
         current = _find_position(gateway, position.symbol, position.ticket)
         if current is None:
+            confirmed_at = datetime.now(UTC)
             memory["status"] = STATE_CLOSE_CONFIRMED
-            memory["confirmed_at"] = datetime.now(UTC).isoformat()
+            memory["confirmed_at"] = confirmed_at.isoformat()
+            memory["close_confirmation_latency_ms"] = round((confirmed_at - request_started).total_seconds() * 1000, 2)
             _record_manager_event(repository, "DEMO_POSITION_CLOSE_CONFIRMED", _manager_payload(position, memory, reason))
             return True
         try:
             close_ticket = gateway.close_position(current, f"xau-manager:{reason}")
+            sent_at = datetime.now(UTC)
+            memory["close_request_sent_at"] = sent_at.isoformat()
             memory["latest_close_ticket"] = close_ticket
             memory["latest_mt5_error"] = None
             memory["close_attempt_count"] = int(memory.get("close_attempt_count", 0)) + 1
@@ -556,8 +566,10 @@ def _close_and_confirm(
                 return False
         for _ in range(CLOSE_CONFIRM_POLLS):
             if _find_position(gateway, position.symbol, position.ticket) is None:
+                confirmed_at = datetime.now(UTC)
                 memory["status"] = STATE_CLOSE_CONFIRMED
-                memory["confirmed_at"] = datetime.now(UTC).isoformat()
+                memory["confirmed_at"] = confirmed_at.isoformat()
+                memory["close_confirmation_latency_ms"] = round((confirmed_at - request_started).total_seconds() * 1000, 2)
                 _record_manager_event(repository, "DEMO_POSITION_CLOSE_CONFIRMED", _manager_payload(position, memory, reason))
                 return True
             time.sleep(CLOSE_CONFIRM_SLEEP_SECONDS)

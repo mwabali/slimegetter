@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     observation_min_market_quality: float = Field(default=4.0, ge=0, le=10)
     demo_exploration_enabled: bool = False
     demo_exploration_min_market_quality: float = Field(default=0.0, ge=0, le=10)
+    demo_entry_poll_seconds: int = Field(default=5, ge=1, le=300)
     demo_position_manager_enabled: bool = False
     demo_position_poll_seconds: int = Field(default=5, ge=1, le=300)
     demo_position_max_minutes: int = Field(default=45, ge=1, le=1440)
