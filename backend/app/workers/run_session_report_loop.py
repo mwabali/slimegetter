@@ -25,7 +25,7 @@ def completed_windows(now_utc: datetime) -> list[SessionBounds]:
 
 def generate_completed_reports(now_utc: datetime | None = None) -> list[Path]:
     current = (now_utc or datetime.now(UTC)).astimezone(UTC)
-    root = Path(__file__).resolve().parents[2] / "reports" / "session"
+    root = Path(__file__).resolve().parents[3] / "reports" / "session"
     generated: list[Path] = []
     for bounds in completed_windows(current):
         with SessionLocal() as session:
