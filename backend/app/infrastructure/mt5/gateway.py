@@ -466,8 +466,6 @@ class MetaTrader5Gateway:
             "symbol": symbol,
             "sl": float(stop_loss if stop_loss is not None else position.stop_loss or 0),
             "tp": float(take_profit if take_profit is not None else position.take_profit or 0),
-            "magic": 260713,
-            "comment": comment[:31],
         }
         result = self._mt5.order_send(request)
         if result is None or result.retcode != self._mt5.TRADE_RETCODE_DONE:

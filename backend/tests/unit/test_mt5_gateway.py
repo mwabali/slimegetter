@@ -1,10 +1,13 @@
+from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from app.agents.erwin.service import CommanderErwinService
 from app.infrastructure.mt5.gateway import ExecutionDisabledError, MockMt5Gateway
+from app.infrastructure.mt5.gateway import MetaTrader5Gateway, Mt5Position
 from app.application.execution import DemoExecutionService
 from app.application.avenger import AvengerBracketBuilder
 from app.domain.market.models import MarketSession, MarketSnapshot
@@ -59,3 +62,49 @@ def test_demo_execution_submits_approved_avenger_bracket(monkeypatch) -> None:
         assert [order.order_type for order in gateway.orders] == ["BUY_STOP", "SELL_STOP"]
     finally:
         get_settings.cache_clear()
+
+
+def test_sltp_request_uses_mt5_supported_fields_only() -> None:
+    class FakeMt5:
+        TRADE_ACTION_SLTP = 6
+        TRADE_RETCODE_DONE = 10009
+
+        def __init__(self) -> None:
+            self.request = None
+
+        def symbol_info(self, symbol):
+            return SimpleNamespace(digits=2)
+
+        def symbol_select(self, symbol, enabled):
+            return True
+
+        def order_send(self, request):
+            self.request = request
+            return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE)
+
+        def last_error(self):
+            return (0, "")
+
+    fake = FakeMt5()
+    gateway = MetaTrader5Gateway(fake, allow_orders=True, kill_switch=lambda: False)
+    original = Mt5Position(
+        ticket="42", symbol="XAUUSD", side="BUY", volume=Decimal("0.01"),
+        price_open=Decimal("4010"), stop_loss=Decimal("4000"),
+        take_profit=Decimal("4020"), profit=Decimal("1.2"),
+        opened_at=datetime.now(UTC),
+    )
+    confirmed = original.__class__(
+        ticket=original.ticket, symbol=original.symbol, side=original.side,
+        volume=original.volume, price_open=original.price_open,
+        stop_loss=Decimal("4005"), take_profit=original.take_profit,
+        profit=original.profit, opened_at=original.opened_at,
+    )
+    gateway.get_positions = lambda symbol=None: (confirmed,)
+
+    result = gateway.modify_position_protection(original, Decimal("4005"), Decimal("4020"), "ignored-comment")
+
+    assert result.stop_loss == Decimal("4005")
+    assert fake.request["action"] == fake.TRADE_ACTION_SLTP
+    assert fake.request["position"] == 42
+    assert "comment" not in fake.request
+    assert "magic" not in fake.request
