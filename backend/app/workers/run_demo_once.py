@@ -10,6 +10,9 @@ from decimal import ROUND_DOWN, Decimal
 from sqlalchemy import select
 
 from app.agents.erwin.service import CommanderErwinService
+from app.agents.annie.models import NewsRiskStatus
+from app.agents.mikasa.models import TradingPermission
+from app.application.avenger import AvengerBracketBuilder
 from app.application.execution import DemoExecutionService
 from app.application.position_sizing import PositionSizer
 from app.application.workflows.decision_preview import DecisionPreview
@@ -61,6 +64,276 @@ def _confirm_broker_protection(gateway: MetaTrader5Gateway, proposal, ticket: st
     )
 
 
+def _managed_avenger_orders(gateway: MetaTrader5Gateway) -> tuple:
+    get_orders = getattr(gateway, "get_orders", None)
+    if not callable(get_orders):
+        return ()
+    return tuple(
+        order
+        for order in get_orders("XAUUSD")
+        if (order.comment or "").startswith("xau-avenger:") or order.magic == 260713
+    )
+
+
+def _record_avenger_attempt(session, proposal, ticket: str, risk_amount: Decimal) -> None:
+    attempt = session.scalar(
+        select(ExecutionAttemptRecord).where(ExecutionAttemptRecord.proposal_id == proposal.id)
+    )
+    if attempt:
+        attempt.status = "SUBMITTED"
+        attempt.broker_ticket = ticket
+        attempt.entry_price = proposal.entry_price
+        attempt.initial_stop_loss = proposal.stop_loss
+        attempt.initial_take_profit = proposal.take_profit
+        attempt.initial_risk_price = abs(proposal.entry_price - proposal.stop_loss)
+        attempt.initial_risk_usd = risk_amount
+        attempt.intended_reward_risk = proposal.reward_risk_ratio()
+        attempt.volume = proposal.volume
+
+
+def _run_avenger_bracket(
+    preview: DecisionPreview,
+    gateway: MetaTrader5Gateway,
+    profile: RiskProfile,
+    settings,
+    repository: TradeJournalRepository,
+) -> str:
+    if preview.market is None:
+        raise RuntimeError("Avenger bracket requires a market snapshot")
+    if preview.annie.status is not NewsRiskStatus.SAFE:
+        with SessionLocal() as session:
+            repository.record_preview(session, preview)
+            repository.record_collective_events(
+                session,
+                preview.correlation_id,
+                (
+                    (
+                        6,
+                        "EXECUTION",
+                        "NO_ORDER",
+                        json.dumps({"reason": "Annie information-risk block"}),
+                    ),
+                ),
+            )
+            repository.record_heartbeat(
+                session, "demo-worker", "HEALTHY", "Avenger bracket blocked by Annie"
+            )
+        return "NO_ORDER"
+    if preview.mikasa.hard_blocked or preview.mikasa.permission is TradingPermission.WAIT:
+        with SessionLocal() as session:
+            repository.record_preview(session, preview)
+            repository.record_collective_events(
+                session,
+                preview.correlation_id,
+                ((6, "EXECUTION", "NO_ORDER", json.dumps({"reason": preview.mikasa.reasons})),),
+            )
+            repository.record_heartbeat(
+                session, "demo-worker", "HEALTHY", "Avenger bracket blocked by Mikasa hard gate"
+            )
+        return "NO_ORDER"
+
+    gateway.connect()
+    try:
+        account = gateway.get_account_snapshot()
+        if gateway.get_positions("XAUUSD") or _managed_avenger_orders(gateway):
+            with SessionLocal() as session:
+                repository.record_preview(session, preview)
+                repository.record_collective_events(
+                    session,
+                    preview.correlation_id,
+                    (
+                        (
+                            6,
+                            "EXECUTION",
+                            "NO_ORDER",
+                            json.dumps(
+                                {
+                                    "reason": (
+                                        "Avenger waits for flat exposure and no "
+                                        "managed pending orders"
+                                    )
+                                }
+                            ),
+                        ),
+                    ),
+                )
+                repository.record_heartbeat(
+                    session,
+                    "demo-worker",
+                    "HEALTHY",
+                    "Avenger bracket skipped: exposure already active",
+                )
+            return "NO_ORDER_ACTIVE_EXPOSURE"
+        with SessionLocal() as session:
+            execution_locked = repository.has_critical_execution_incident(session)
+        plan = AvengerBracketBuilder().build(
+            preview.market,
+            settings,
+            profile.risk_per_trade_pct,
+            preview.correlation_id,
+        )
+        spread = plan.spread
+        erwin = CommanderErwinService()
+        buy_decision = erwin.evaluate(
+            plan.buy.proposal, account, profile, spread, execution_locked=execution_locked
+        )
+        sell_decision = erwin.evaluate(
+            plan.sell.proposal, account, profile, spread, execution_locked=execution_locked
+        )
+        with SessionLocal() as session:
+            repository.record_preview(session, preview)
+            repository.record_collective_events(
+                session,
+                preview.correlation_id,
+                (
+                    (
+                        6,
+                        "EREN",
+                        "AVENGER_BRACKET_PROPOSAL",
+                        json.dumps(
+                            {
+                                "profile": plan.profile_name,
+                                "symbol": plan.symbol,
+                                "effective_trigger": str(plan.effective_trigger),
+                                "spread": str(plan.spread),
+                                "trail_distance": str(plan.trail_distance),
+                                "expires_at": plan.expires_at.isoformat(),
+                                "buy": plan.buy.proposal.model_dump(mode="json"),
+                                "sell": plan.sell.proposal.model_dump(mode="json"),
+                            }
+                        ),
+                    ),
+                    (
+                        7,
+                        "COMMANDER_ERWIN",
+                        "AVENGER_BUY_RISK_DECISION",
+                        buy_decision.model_dump_json(),
+                    ),
+                    (
+                        8,
+                        "COMMANDER_ERWIN",
+                        "AVENGER_SELL_RISK_DECISION",
+                        sell_decision.model_dump_json(),
+                    ),
+                ),
+            )
+        if (
+            buy_decision.status is not ProposalStatus.APPROVED
+            or sell_decision.status is not ProposalStatus.APPROVED
+        ):
+            with SessionLocal() as session:
+                repository.record_collective_events(
+                    session,
+                    preview.correlation_id,
+                    (
+                        (
+                            9,
+                            "EXECUTION",
+                            "NO_ORDER",
+                            json.dumps(
+                                {"buy": buy_decision.reasons, "sell": sell_decision.reasons}
+                            ),
+                        ),
+                    ),
+                )
+                repository.record_heartbeat(
+                    session,
+                    "demo-worker",
+                    "HEALTHY",
+                    "Erwin rejected Avenger bracket; no pending orders",
+                )
+            return "NO_ORDER"
+        risk_amount = account.equity * profile.risk_per_trade_pct / Decimal("100")
+        with SessionLocal() as session:
+            for proposal in (plan.buy.proposal, plan.sell.proposal):
+                existing = session.scalar(
+                    select(ExecutionAttemptRecord).where(
+                        ExecutionAttemptRecord.proposal_id == proposal.id
+                    )
+                )
+                if existing is not None:
+                    repository.record_heartbeat(
+                        session,
+                        "demo-worker",
+                        "ERROR",
+                        "Duplicate Avenger bracket submission blocked",
+                    )
+                    return "NO_ORDER_DUPLICATE_BLOCKED"
+                session.add(
+                    ExecutionAttemptRecord(
+                        proposal_id=proposal.id,
+                        correlation_id=proposal.correlation_id,
+                        status="CLAIMED",
+                    )
+                )
+            session.commit()
+        try:
+            tickets = DemoExecutionService(gateway, True, "demo").submit_bracket(
+                plan, buy_decision, sell_decision
+            )
+        except Exception as exc:
+            with SessionLocal() as session:
+                for proposal in (plan.buy.proposal, plan.sell.proposal):
+                    attempt = session.scalar(
+                        select(ExecutionAttemptRecord).where(
+                            ExecutionAttemptRecord.proposal_id == proposal.id
+                        )
+                    )
+                    if attempt:
+                        attempt.status = "UNKNOWN_RECONCILE"
+                        attempt.error_type = type(exc).__name__
+                session.add(
+                    AlertRecord(
+                        severity="CRITICAL",
+                        message=(
+                            "Avenger bracket blocked pending broker reconciliation: "
+                            f"{type(exc).__name__}"
+                        ),
+                    )
+                )
+                session.commit()
+                repository.record_heartbeat(
+                    session,
+                    "demo-worker",
+                    "ERROR",
+                    "Avenger bracket outcome unknown; reconciliation required",
+                )
+            raise
+        buy_ticket, sell_ticket = tickets.split(",", 1)
+        with SessionLocal() as session:
+            _record_avenger_attempt(session, plan.buy.proposal, buy_ticket, risk_amount)
+            _record_avenger_attempt(session, plan.sell.proposal, sell_ticket, risk_amount)
+            session.commit()
+            repository.record_collective_events(
+                session,
+                preview.correlation_id,
+                (
+                    (
+                        9,
+                        "EXECUTION",
+                        "AVENGER_BRACKET_SUBMITTED",
+                        json.dumps(
+                            {
+                                "profile": plan.profile_name,
+                                "buy_ticket": buy_ticket,
+                                "sell_ticket": sell_ticket,
+                                "methodology": (
+                                    "TradingBot Master Avenger pending "
+                                    "buy-stop/sell-stop bracket"
+                                ),
+                            }
+                        ),
+                    ),
+                ),
+            )
+            repository.record_heartbeat(
+                session, "demo-worker", "HEALTHY", f"Avenger bracket submitted: {tickets}"
+            )
+        return tickets
+    finally:
+        gateway.shutdown()
+
+
 def run_once() -> str:
     settings = get_settings()
     if settings.trading_mode != "demo":
@@ -94,6 +367,9 @@ def run_once() -> str:
         observation_active or exploration_active,
         exploration_trade_when_flat=exploration_active,
     )
+
+    if settings.demo_strategy_engine == "AVENGER_STRADDLE":
+        return _run_avenger_bracket(preview, gateway, profile, settings, repository)
 
     if preview.eren is None or preview.erwin is None or preview.erwin.status is not ProposalStatus.APPROVED:
         with SessionLocal() as session:

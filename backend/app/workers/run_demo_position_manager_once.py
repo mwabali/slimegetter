@@ -316,6 +316,51 @@ def _record_close_failure_alert(repository: TradeJournalRepository, position_tic
         repository.record_heartbeat(session, "demo-position-manager", "ERROR", message)
 
 
+def _is_managed_avenger_order(order: object) -> bool:
+    comment = str(getattr(order, "comment", "") or "")
+    magic = getattr(order, "magic", None)
+    return comment.startswith("xau-avenger:") or magic == 260713
+
+
+def _cancel_opposite_avenger_pending_orders(
+    gateway: MetaTrader5Gateway,
+    repository: TradeJournalRepository,
+    positions: tuple[Mt5Position, ...],
+) -> int:
+    if not positions:
+        return 0
+    get_orders = getattr(gateway, "get_orders", None)
+    cancel_order = getattr(gateway, "cancel_order", None)
+    if not callable(get_orders) or not callable(cancel_order):
+        return 0
+    cancelled = 0
+    for order in tuple(get_orders("XAUUSD")):
+        if not _is_managed_avenger_order(order):
+            continue
+        try:
+            cancel_ticket = cancel_order(order, "xau-avenger:oco-cancel")
+            cancelled += 1
+            _record_manager_event(
+                repository,
+                "AVENGER_OPPOSITE_PENDING_CANCELLED",
+                {
+                    "order_ticket": getattr(order, "ticket", None),
+                    "cancel_ticket": cancel_ticket,
+                    "reason": "A bracket leg filled; Pixis removed remaining managed pending exposure",
+                },
+            )
+        except Exception as exc:
+            _record_manager_event(
+                repository,
+                "AVENGER_PENDING_CANCEL_FAILED",
+                {
+                    "order_ticket": getattr(order, "ticket", None),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+    return cancelled
+
+
 def _parse_time(value: object) -> datetime | None:
     if not value:
         return None
@@ -445,6 +490,7 @@ def run_once() -> dict[str, int]:
     state = _load_state()
     try:
         positions = gateway.get_positions("XAUUSD")
+        cancelled_pending = _cancel_opposite_avenger_pending_orders(gateway, repository, positions)
         seen_tickets = {position.ticket for position in positions}
         now = datetime.now(UTC).isoformat()
         for ticket, record in tuple(state.items()):
@@ -455,7 +501,7 @@ def run_once() -> dict[str, int]:
                 record.setdefault("pending_exit_reason", "BROKER_OR_MANUAL_CLOSE_RECONCILED")
                 _record_manager_event(repository, "DEMO_POSITION_RECONCILED_CLOSED", {"source_ticket": ticket, **record})
         with SessionLocal() as session:
-            repository.record_heartbeat(session, "demo-position-manager", "RUNNING", f"Pixis managing {len(positions)} open XAUUSD position(s)")
+            repository.record_heartbeat(session, "demo-position-manager", "RUNNING", f"Pixis managing {len(positions)} open XAUUSD position(s); cancelled_pending={cancelled_pending}")
             synchronizer.sync_positions(session, positions)
         for position in positions:
             memory = _update_position_memory(position, state)

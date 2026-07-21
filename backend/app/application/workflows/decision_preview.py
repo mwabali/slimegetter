@@ -22,6 +22,7 @@ class DecisionPreview(BaseModel):
     mikasa: MikasaAssessment
     eren: TradeProposal | None
     erwin: RiskDecision | None
+    market: MarketSnapshot | None = None
     final_message: str
     correlation_id: UUID
 
@@ -69,7 +70,7 @@ class DecisionPreviewWorkflow:
             similar_performance=similar_market_performance,
         )
         if annie.status is not NewsRiskStatus.SAFE:
-            return DecisionPreview(annie=annie, mikasa=mikasa, eren=None, erwin=None, correlation_id=correlation_id, final_message="WAIT: Annie flagged information risk")
+            return DecisionPreview(annie=annie, mikasa=mikasa, eren=None, erwin=None, market=market, correlation_id=correlation_id, final_message="WAIT: Annie flagged information risk")
         try:
             eren = self._eren.generate(market, profile.risk_per_trade_pct, correlation_id)
         except ValueError as exc:
@@ -95,7 +96,7 @@ class DecisionPreviewWorkflow:
                     session=market.session.value,
                 )
             else:
-                return DecisionPreview(annie=annie, mikasa=mikasa, eren=None, erwin=None, correlation_id=correlation_id, final_message=f"HOLD: {exc}")
+                return DecisionPreview(annie=annie, mikasa=mikasa, eren=None, erwin=None, market=market, correlation_id=correlation_id, final_message=f"HOLD: {exc}")
         adjusted_confidence = (eren.confidence * mikasa.confidence_multiplier).quantize(Decimal("0.0001"))
         adjusted_risk = min(
             profile.risk_per_trade_pct,
@@ -112,6 +113,7 @@ class DecisionPreviewWorkflow:
             mikasa=mikasa,
             eren=eren,
             erwin=erwin,
+            market=market,
             correlation_id=correlation_id,
             final_message=f"{erwin.status.value}: {erwin.reasons[0]}",
         )

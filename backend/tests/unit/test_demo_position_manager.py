@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from app.config.settings import get_settings
-from app.infrastructure.mt5.gateway import Mt5Position
+from app.infrastructure.mt5.gateway import Mt5Order, Mt5Position
 from app.workers import run_demo_position_manager_once as manager
 
 
@@ -65,6 +65,21 @@ class StaticGateway:
         )
         self.positions = [updated if p.ticket == updated.ticket else p for p in self.positions]
         return updated
+
+
+class PendingGateway(StaticGateway):
+    def __init__(self, positions, orders):
+        super().__init__(positions)
+        self.orders = list(orders)
+        self.cancelled = []
+
+    def get_orders(self, symbol=None):
+        return tuple(self.orders)
+
+    def cancel_order(self, order, comment):
+        self.cancelled.append((order.ticket, comment))
+        self.orders = [open_order for open_order in self.orders if open_order.ticket != order.ticket]
+        return f"cancel-{order.ticket}"
 
 
 def test_profit_target_beats_trailing_when_both_are_true(monkeypatch) -> None:
@@ -227,3 +242,25 @@ def test_market_closed_cooldown_blocks_latched_retry(monkeypatch) -> None:
         assert manager._latched_close_reason(StaticGateway(()), position(profit="-1.00"), memory, object()) is None
     finally:
         get_settings.cache_clear()
+
+
+def test_pixis_cancels_remaining_avenger_pending_order_when_bracket_leg_fills(monkeypatch) -> None:
+    open_position = position(ticket="filled-buy", side="BUY")
+    pending_sell = Mt5Order(
+        ticket="pending-sell",
+        symbol="XAUUSD",
+        side="SELL",
+        order_type="SELL_STOP",
+        volume=Decimal("0.01"),
+        price_open=Decimal("4008.50"),
+        stop_loss=Decimal("4010.00"),
+        take_profit=Decimal("4002.50"),
+        magic=260713,
+        comment="xau-avenger:FLASH:SELL",
+    )
+    gateway = PendingGateway((open_position,), (pending_sell,))
+    monkeypatch.setattr(manager, "_record_manager_event", lambda *args, **kwargs: None)
+
+    assert manager._cancel_opposite_avenger_pending_orders(gateway, object(), (open_position,)) == 1
+    assert gateway.cancelled == [("pending-sell", "xau-avenger:oco-cancel")]
+    assert gateway.get_orders("XAUUSD") == ()

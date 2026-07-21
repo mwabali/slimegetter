@@ -17,6 +17,22 @@ class Settings(BaseSettings):
     trading_mode: Literal["demo", "live"] = "demo"
     demo_trading_confirmed: bool = False
     demo_entry_enabled: bool = True
+    demo_strategy_engine: Literal["DIRECTIONAL", "AVENGER_STRADDLE"] = "AVENGER_STRADDLE"
+    avenger_profile_mode: Literal["HYBRID", "THOR", "FLASH"] = "HYBRID"
+    avenger_volume: float = Field(default=0.01, gt=0)
+    avenger_trigger_spread_multiplier: float = Field(default=3.0, ge=0, le=20)
+    avenger_min_effective_trigger_price: float = Field(default=0.70, gt=0, le=20)
+    avenger_thor_trigger_price: float = Field(default=2.00, gt=0, le=50)
+    avenger_thor_stop_price: float = Field(default=6.00, gt=0, le=100)
+    avenger_thor_take_profit_price: float = Field(default=9.00, gt=0, le=200)
+    avenger_thor_trail_price: float = Field(default=0.80, gt=0, le=20)
+    avenger_flash_trigger_price: float = Field(default=0.70, gt=0, le=50)
+    avenger_flash_stop_price: float = Field(default=1.50, gt=0, le=100)
+    avenger_flash_take_profit_price: float = Field(default=6.00, gt=0, le=200)
+    avenger_flash_trail_price: float = Field(default=0.30, gt=0, le=20)
+    avenger_flash_min_momentum_score: float = Field(default=7.0, ge=0, le=10)
+    avenger_flash_max_spread_price: float = Field(default=0.70, gt=0, le=20)
+    avenger_pending_expiration_minutes: int = Field(default=120, ge=1, le=1440)
     kill_switch_active: bool = True
     max_tick_age_seconds: int = Field(default=15, ge=1, le=300)
     max_bar_age_seconds: int = Field(default=600, ge=60, le=3600)
