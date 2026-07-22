@@ -15,7 +15,8 @@ $pidFile = Join-Path $work "runtime-pids.json"
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 if (-not $python) { throw "No usable Python environment was found for the session build." }
 if (-not (Test-Path -LiteralPath $node)) { throw "Bundled Node.js was not found: $node" }
-if (-not (Test-Path -LiteralPath $vite)) { throw "Dashboard dependencies are missing. Run pnpm install in frontend." }
+$dashboardAvailable = Test-Path -LiteralPath $vite
+if (-not $dashboardAvailable) { Write-Warning "Dashboard dependencies are missing; trading workers will still start without the dashboard." }
 
 $terminalCandidates = @(
     (Join-Path $env:ProgramFiles "MetaTrader 5\terminal64.exe"),
@@ -96,17 +97,23 @@ foreach ($name in $workers.Keys) {
     }
 }
 
-if (Test-Port 5173) {
-    Write-Host "Dashboard is already listening on port 5173"
-} else {
-    $pids.dashboard = Start-HiddenProcess "dashboard" $node @($vite, "--host", "127.0.0.1", "--port", "5173") (Join-Path $root "frontend")
+if ($dashboardAvailable) {
+    if (Test-Port 5173) {
+        Write-Host "Dashboard is already listening on port 5173"
+    } else {
+        $pids.dashboard = Start-HiddenProcess "dashboard" $node @($vite, "--host", "127.0.0.1", "--port", "5173") (Join-Path $root "frontend")
+    }
 }
 
 $pids | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
 Start-Sleep -Seconds 3
-Start-Process "http://127.0.0.1:5173"
 Write-Host "Mission Control is starting in GUARDED DEMO EXECUTION MODE."
 Write-Host "Pixis close manager: enabled=$env:XAU_DEMO_POSITION_MANAGER_ENABLED policy=$env:XAU_DEMO_POSITION_EXIT_POLICY poll=${env:XAU_DEMO_POSITION_POLL_SECONDS}s oppositeSignal=$env:XAU_DEMO_POSITION_CLOSE_ON_OPPOSITE_SIGNAL trailingActivation=$env:XAU_DEMO_POSITION_TRAILING_ACTIVATION_USD givebackUsd=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_USD givebackPct=$env:XAU_DEMO_POSITION_TRAILING_GIVEBACK_PCT"
 Write-Host "Demo entry worker enabled: $env:XAU_DEMO_ENTRY_ENABLED"
-Write-Host "Dashboard: http://127.0.0.1:5173"
+if ($dashboardAvailable) {
+    Start-Process "http://127.0.0.1:5173"
+    Write-Host "Dashboard: http://127.0.0.1:5173"
+} else {
+    Write-Host "Dashboard: unavailable in this session checkout"
+}
 Write-Host "API health: http://127.0.0.1:8000/api/v1/health"
