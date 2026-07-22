@@ -3,13 +3,17 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root "backend"
 $work = Join-Path $root "work"
-$python = Join-Path $backend ".venv\Scripts\python.exe"
+$pythonCandidates = @(
+    (Join-Path $backend ".venv\Scripts\python.exe"),
+    (Join-Path (Split-Path -Parent $root) "slimegetter\backend\.venv\Scripts\python.exe")
+) | Where-Object { Test-Path -LiteralPath $_ }
+$python = $pythonCandidates | Select-Object -First 1
 $node = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
 $vite = Join-Path $root "frontend\node_modules\vite\bin\vite.js"
 $pidFile = Join-Path $work "runtime-pids.json"
 
 New-Item -ItemType Directory -Path $work -Force | Out-Null
-if (-not (Test-Path -LiteralPath $python)) { throw "Project Python environment was not found: $python" }
+if (-not $python) { throw "No usable Python environment was found for the session build." }
 if (-not (Test-Path -LiteralPath $node)) { throw "Bundled Node.js was not found: $node" }
 if (-not (Test-Path -LiteralPath $vite)) { throw "Dashboard dependencies are missing. Run pnpm install in frontend." }
 
