@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     trading_mode: Literal["demo", "live"] = "demo"
     demo_trading_confirmed: bool = False
     demo_entry_enabled: bool = True
+    demo_override_weekly_loss_stop: bool = False
     demo_strategy_engine: Literal["DIRECTIONAL", "AVENGER_STRADDLE"] = "AVENGER_STRADDLE"
     avenger_profile_mode: Literal["HYBRID", "THOR", "FLASH"] = "HYBRID"
     avenger_volume: float = Field(default=0.01, gt=0)

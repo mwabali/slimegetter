@@ -20,6 +20,7 @@ class CommanderErwinService:
         current_spread: Decimal,
         execution_locked: bool = False,
         defensive_risk: RiskStateAssessment | None = None,
+        override_weekly_loss_stop: bool = False,
     ) -> RiskDecision:
         survival_rejections: list[str] = []
         accepted_warnings: list[str] = []
@@ -61,7 +62,10 @@ class CommanderErwinService:
             survival_rejections.append("Account-survival stop: maximum daily loss reached")
         weekly_loss_limit = -(account.equity * profile.max_weekly_loss_pct / Decimal("100"))
         if account.realized_weekly_pnl <= weekly_loss_limit:
-            survival_rejections.append("Account-survival stop: maximum weekly loss reached")
+            if override_weekly_loss_stop:
+                accepted_warnings.append("DEMO OVERRIDE: maximum weekly loss stop bypassed for testing")
+            else:
+                survival_rejections.append("Account-survival stop: maximum weekly loss reached")
         if account.free_margin <= Decimal("0"):
             survival_rejections.append("No free margin available")
         if not self._has_valid_levels(proposal):

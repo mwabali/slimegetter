@@ -71,3 +71,15 @@ def test_rejects_when_execution_is_locked() -> None:
     result = CommanderErwinService().evaluate(proposal(), account(), profile(), Decimal("0.5"), execution_locked=True)
     assert result.status is ProposalStatus.REJECTED
     assert any("Execution locked" in reason for reason in result.reasons)
+
+
+def test_demo_weekly_loss_override_bypasses_only_weekly_stop() -> None:
+    result = CommanderErwinService().evaluate(
+        proposal(),
+        account(realized_weekly_pnl="-600"),
+        profile(),
+        Decimal("0.5"),
+        override_weekly_loss_stop=True,
+    )
+    assert result.status is ProposalStatus.APPROVED
+    assert any("DEMO OVERRIDE" in warning for warning in result.accepted_warnings)

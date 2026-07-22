@@ -203,6 +203,12 @@ def _run_avenger_bracket(
         )
         spread = plan.spread
         erwin = CommanderErwinService()
+        override_weekly_loss_stop = bool(
+            settings.demo_override_weekly_loss_stop
+            and settings.trading_mode == "demo"
+            and settings.execution_enabled
+            and settings.demo_trading_confirmed
+        )
         buy_decision = erwin.evaluate(
             plan.buy.proposal,
             account,
@@ -210,6 +216,7 @@ def _run_avenger_bracket(
             spread,
             execution_locked=execution_locked,
             defensive_risk=effective_risk,
+            override_weekly_loss_stop=override_weekly_loss_stop,
         )
         sell_decision = erwin.evaluate(
             plan.sell.proposal,
@@ -218,6 +225,7 @@ def _run_avenger_bracket(
             spread,
             execution_locked=execution_locked,
             defensive_risk=effective_risk,
+            override_weekly_loss_stop=override_weekly_loss_stop,
         )
         with SessionLocal() as session:
             repository.record_preview(session, preview)
@@ -447,6 +455,12 @@ def run_once() -> str:
     with SessionLocal() as session:
         repository.record_heartbeat(session, "demo-worker", "RUNNING", "Guarded demo cycle started")
     profile = _profile(settings)
+    override_weekly_loss_stop = bool(
+        settings.demo_override_weekly_loss_stop
+        and settings.trading_mode == "demo"
+        and settings.execution_enabled
+        and settings.demo_trading_confirmed
+    )
     observation_active = bool(settings.observation_mode_until and datetime.now(UTC) < settings.observation_mode_until)
     exploration_active = bool(settings.demo_exploration_enabled)
     minimum_market_quality = Decimal(str(settings.demo_exploration_min_market_quality)) if exploration_active else Decimal(str(settings.observation_min_market_quality)) if observation_active else Decimal("7.00")
@@ -558,6 +572,7 @@ def _sizing_payload(decision: DefensiveVolumeDecision, assessment: RiskStateAsse
             tick.ask - tick.bid,
             execution_locked=execution_locked,
             defensive_risk=effective_risk,
+            override_weekly_loss_stop=override_weekly_loss_stop,
         )
         if decision.status is ProposalStatus.APPROVED and decision.recommended_size_multiplier < Decimal("1"):
             raw_volume = proposal.volume * decision.recommended_size_multiplier
