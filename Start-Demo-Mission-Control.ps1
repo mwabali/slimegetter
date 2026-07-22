@@ -26,6 +26,9 @@ $env:XAU_TRADING_MODE = "demo"
 $env:XAU_EXECUTION_ENABLED = "true"
 $env:XAU_DEMO_TRADING_CONFIRMED = "true"
 $env:XAU_DEMO_OVERRIDE_WEEKLY_LOSS_STOP = "true"
+# Temporary demo-only override for today's scheduled 03:00-06:00 EAT window.
+# It expires automatically at 03:00 UTC and does not bypass HALTED/UNKNOWN states.
+$env:XAU_DEMO_OVERRIDE_DEFENSIVE_COOLDOWN_UNTIL = "2026-07-22T03:00:00Z"
 $env:XAU_KILL_SWITCH_ACTIVE = "false"
 $env:XAU_MT5_SERVER_UTC_OFFSET_HOURS = "3"
 $env:XAU_NEWS_PROVIDER = "manual"

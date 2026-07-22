@@ -21,6 +21,7 @@ class CommanderErwinService:
         execution_locked: bool = False,
         defensive_risk: RiskStateAssessment | None = None,
         override_weekly_loss_stop: bool = False,
+        override_defensive_cooldown: bool = False,
     ) -> RiskDecision:
         survival_rejections: list[str] = []
         accepted_warnings: list[str] = []
@@ -33,9 +34,14 @@ class CommanderErwinService:
                     f"Defensive risk state {defensive_risk.state.value}: {defensive_risk.state_reason}"
                 )
             elif defensive_risk.new_entries_blocked:
-                survival_rejections.append(
-                    f"Defensive risk cooldown active until {defensive_risk.cooldown_until}"
-                )
+                if override_defensive_cooldown and defensive_risk.cooldown_until is not None:
+                    accepted_warnings.append(
+                        f"DEMO OVERRIDE: defensive cooldown bypassed until {defensive_risk.cooldown_until}"
+                    )
+                else:
+                    survival_rejections.append(
+                        f"Defensive risk cooldown active until {defensive_risk.cooldown_until}"
+                    )
             elif defensive_risk.risk_multiplier < Decimal("1"):
                 accepted_warnings.append(
                     f"Defensive risk state {defensive_risk.state.value} will limit new volume to {defensive_risk.risk_multiplier}x before submission"

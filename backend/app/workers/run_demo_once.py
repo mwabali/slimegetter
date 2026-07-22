@@ -209,6 +209,7 @@ def _run_avenger_bracket(
             and settings.execution_enabled
             and settings.demo_trading_confirmed
         )
+        override_defensive_cooldown = _demo_defensive_cooldown_override_active(settings)
         buy_decision = erwin.evaluate(
             plan.buy.proposal,
             account,
@@ -217,6 +218,7 @@ def _run_avenger_bracket(
             execution_locked=execution_locked,
             defensive_risk=effective_risk,
             override_weekly_loss_stop=override_weekly_loss_stop,
+            override_defensive_cooldown=override_defensive_cooldown,
         )
         sell_decision = erwin.evaluate(
             plan.sell.proposal,
@@ -226,6 +228,7 @@ def _run_avenger_bracket(
             execution_locked=execution_locked,
             defensive_risk=effective_risk,
             override_weekly_loss_stop=override_weekly_loss_stop,
+            override_defensive_cooldown=override_defensive_cooldown,
         )
         with SessionLocal() as session:
             repository.record_preview(session, preview)
@@ -312,6 +315,7 @@ def _run_avenger_bracket(
                 risk_assessment,
                 specification,
                 sizing_mode,
+                allow_cooldown_override=override_defensive_cooldown,
             )
         except DefensiveVolumeBlocked as exc:
             with SessionLocal() as session:
@@ -442,6 +446,17 @@ def _symbol_specification(raw: object) -> SymbolSpecification:
     )
 
 
+def _demo_defensive_cooldown_override_active(settings) -> bool:
+    until = settings.demo_override_defensive_cooldown_until
+    return bool(
+        settings.trading_mode == "demo"
+        and settings.execution_enabled
+        and settings.demo_trading_confirmed
+        and until is not None
+        and datetime.now(UTC) < until
+    )
+
+
 def _refresh_defensive_risk(
     account,
     repository: TradeJournalRepository,
@@ -509,6 +524,7 @@ def run_once() -> str:
         and settings.execution_enabled
         and settings.demo_trading_confirmed
     )
+    override_defensive_cooldown = _demo_defensive_cooldown_override_active(settings)
     observation_active = bool(settings.observation_mode_until and datetime.now(UTC) < settings.observation_mode_until)
     exploration_active = bool(settings.demo_exploration_enabled)
     minimum_market_quality = Decimal(str(settings.demo_exploration_min_market_quality)) if exploration_active else Decimal(str(settings.observation_min_market_quality)) if observation_active else Decimal("7.00")
@@ -572,6 +588,7 @@ def run_once() -> str:
             execution_locked=execution_locked,
             defensive_risk=effective_risk,
             override_weekly_loss_stop=override_weekly_loss_stop,
+            override_defensive_cooldown=override_defensive_cooldown,
         )
         if decision.status is ProposalStatus.APPROVED and decision.recommended_size_multiplier < Decimal("1"):
             raw_volume = proposal.volume * decision.recommended_size_multiplier
@@ -605,6 +622,7 @@ def run_once() -> str:
                 risk_assessment,
                 specification,
                 sizing_mode,
+                allow_cooldown_override=override_defensive_cooldown,
             )
         except DefensiveVolumeBlocked as exc:
             with SessionLocal() as session:
