@@ -429,6 +429,54 @@ def _run_avenger_bracket(
         gateway.shutdown()
 
 
+def _symbol_specification(raw: object) -> SymbolSpecification:
+    raw_limit = Decimal(str(getattr(raw, "volume_limit", 0) or 0))
+    return SymbolSpecification(
+        symbol=str(getattr(raw, "name", "XAUUSD")),
+        point=Decimal(str(getattr(raw, "point", 0.01))),
+        volume_min=Decimal(str(getattr(raw, "volume_min"))),
+        volume_max=Decimal(str(getattr(raw, "volume_max"))),
+        volume_step=Decimal(str(getattr(raw, "volume_step"))),
+        volume_limit=raw_limit if raw_limit > 0 else None,
+        trade_contract_size=Decimal(str(getattr(raw, "trade_contract_size"))),
+    )
+
+
+def _refresh_defensive_risk(
+    account,
+    repository: TradeJournalRepository,
+) -> tuple[RiskStateAssessment, bool]:
+    with SessionLocal() as session:
+        execution_locked = repository.has_critical_execution_incident(session)
+        try:
+            assessment = DefensiveRiskEngine().refresh(session, account, execution_locked=execution_locked)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            repository.record_heartbeat(session, "demo-worker", "ERROR", f"Defensive risk state unavailable: {type(exc).__name__}")
+            raise DefensiveRiskUnavailable(f"Defensive risk state unavailable: {type(exc).__name__}") from exc
+    return assessment, execution_locked
+
+
+def _sizing_payload(decision: DefensiveVolumeDecision, assessment: RiskStateAssessment) -> dict[str, object]:
+    return {
+        "normal_volume": str(decision.normal_volume),
+        "candidate_volume": str(decision.candidate_volume),
+        "calculated_volume": str(decision.calculated_volume),
+        "adaptive_recommended_volume": str(decision.adaptive_recommended_volume) if decision.adaptive_recommended_volume is not None else None,
+        "approved_volume": str(decision.approved_volume) if decision.approved_volume is not None else None,
+        "risk_multiplier": str(decision.risk_multiplier),
+        "risk_state": assessment.state.value,
+        "risk_state_reason": assessment.state_reason,
+        "sizing_mode": decision.mode.value,
+        "broker_minimum": str(decision.broker_minimum),
+        "broker_maximum": str(decision.broker_maximum),
+        "broker_step": str(decision.broker_step),
+        "broker_volume_limit": str(decision.broker_volume_limit) if decision.broker_volume_limit is not None else None,
+        "reason": decision.reason,
+    }
+
+
 def run_once() -> str:
     settings = get_settings()
     if settings.trading_mode != "demo":
@@ -479,55 +527,6 @@ def run_once() -> str:
         observation_active or exploration_active,
         exploration_trade_when_flat=exploration_active,
     )
-
-
-def _symbol_specification(raw: object) -> SymbolSpecification:
-    raw_limit = Decimal(str(getattr(raw, "volume_limit", 0) or 0))
-    return SymbolSpecification(
-        symbol=str(getattr(raw, "name", "XAUUSD")),
-        point=Decimal(str(getattr(raw, "point", 0.01))),
-        volume_min=Decimal(str(getattr(raw, "volume_min"))),
-        volume_max=Decimal(str(getattr(raw, "volume_max"))),
-        volume_step=Decimal(str(getattr(raw, "volume_step"))),
-        volume_limit=raw_limit if raw_limit > 0 else None,
-        trade_contract_size=Decimal(str(getattr(raw, "trade_contract_size"))),
-    )
-
-
-def _refresh_defensive_risk(
-    account,
-    repository: TradeJournalRepository,
-) -> tuple[RiskStateAssessment, bool]:
-    with SessionLocal() as session:
-        execution_locked = repository.has_critical_execution_incident(session)
-        try:
-            assessment = DefensiveRiskEngine().refresh(session, account, execution_locked=execution_locked)
-            session.commit()
-        except Exception as exc:
-            session.rollback()
-            repository.record_heartbeat(session, "demo-worker", "ERROR", f"Defensive risk state unavailable: {type(exc).__name__}")
-            raise DefensiveRiskUnavailable(f"Defensive risk state unavailable: {type(exc).__name__}") from exc
-    return assessment, execution_locked
-
-
-def _sizing_payload(decision: DefensiveVolumeDecision, assessment: RiskStateAssessment) -> dict[str, object]:
-    return {
-        "normal_volume": str(decision.normal_volume),
-        "candidate_volume": str(decision.candidate_volume),
-        "calculated_volume": str(decision.calculated_volume),
-        "adaptive_recommended_volume": str(decision.adaptive_recommended_volume) if decision.adaptive_recommended_volume is not None else None,
-        "approved_volume": str(decision.approved_volume) if decision.approved_volume is not None else None,
-        "risk_multiplier": str(decision.risk_multiplier),
-        "risk_state": assessment.state.value,
-        "risk_state_reason": assessment.state_reason,
-        "sizing_mode": decision.mode.value,
-        "broker_minimum": str(decision.broker_minimum),
-        "broker_maximum": str(decision.broker_maximum),
-        "broker_step": str(decision.broker_step),
-        "broker_volume_limit": str(decision.broker_volume_limit) if decision.broker_volume_limit is not None else None,
-        "reason": decision.reason,
-    }
-
     if settings.demo_strategy_engine == "AVENGER_STRADDLE":
         return _run_avenger_bracket(preview, gateway, profile, settings, repository)
 
