@@ -85,21 +85,6 @@ def test_halted_blocks_new_volume() -> None:
         calculate_allowed_volume(Decimal("0.04"), Decimal("0.04"), RiskStateAssessmentForTest(RiskState.HALTED, "0"), specification(), RiskSizingMode.DEMO_ACTIVE)
 
 
-def test_demo_cooldown_override_allows_defensive_volume_without_bypassing_halt() -> None:
-    assessment = RiskStateAssessmentForTest(RiskState.DEFENSIVE, "0.50", blocked=True)
-    with pytest.raises(DefensiveVolumeBlocked):
-        calculate_allowed_volume(Decimal("0.04"), Decimal("0.04"), assessment, specification(), RiskSizingMode.DEMO_ACTIVE)
-    result = calculate_allowed_volume(
-        Decimal("0.04"),
-        Decimal("0.04"),
-        assessment,
-        specification(),
-        RiskSizingMode.DEMO_ACTIVE,
-        allow_cooldown_override=True,
-    )
-    assert result.approved_volume == Decimal("0.02")
-
-
 def test_below_minimum_is_skipped_and_not_rounded_up() -> None:
     with pytest.raises(DefensiveVolumeBlocked, match="BELOW_BROKER_MINIMUM"):
         calculate_allowed_volume(Decimal("0.01"), Decimal("0.01"), RiskStateAssessmentForTest(RiskState.DEFENSIVE, "0.50"), specification(), RiskSizingMode.DEMO_ACTIVE)
@@ -196,13 +181,12 @@ def test_volume_above_configured_normal_ceiling_is_rejected() -> None:
 
 
 class RiskStateAssessmentForTest:
-    def __init__(self, state: RiskState, multiplier: str, blocked: bool = False) -> None:
+    def __init__(self, state: RiskState, multiplier: str) -> None:
         self.state = state
         self.risk_multiplier = Decimal(multiplier)
         self.state_reason = "test"
-        self.cooldown_until = datetime.now(UTC) + timedelta(minutes=5) if blocked else None
-        self.blocked = blocked
+        self.cooldown_until = None
 
     @property
     def new_entries_blocked(self) -> bool:
-        return self.blocked or self.state in {RiskState.HALTED, RiskState.UNKNOWN}
+        return self.state in {RiskState.HALTED, RiskState.UNKNOWN}

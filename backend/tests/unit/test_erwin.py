@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 from app.agents.erwin.service import CommanderErwinService
-from app.application.defensive_risk import RiskState
 from app.domain.trading.models import AccountSnapshot, ProposalStatus, RiskProfile, Side, TradeProposal
 
 
@@ -54,6 +53,18 @@ def test_rejects_after_daily_loss_limit() -> None:
     assert any("maximum daily loss" in reason for reason in result.reasons)
 
 
+def test_demo_daily_loss_override_bypasses_only_daily_stop() -> None:
+    result = CommanderErwinService().evaluate(
+        proposal(),
+        account(realized_daily_pnl="-200"),
+        profile(),
+        Decimal("0.5"),
+        override_daily_loss_stop=True,
+    )
+    assert result.status is ProposalStatus.APPROVED
+    assert any("maximum daily loss" in warning for warning in result.accepted_warnings)
+
+
 def test_accepts_wide_spread_as_calculated_risk_at_reduced_size() -> None:
     result = CommanderErwinService().evaluate(proposal(), account(), profile(), Decimal("3"))
     assert result.status is ProposalStatus.APPROVED
@@ -85,37 +96,3 @@ def test_demo_weekly_loss_override_bypasses_only_weekly_stop() -> None:
     assert result.status is ProposalStatus.APPROVED
     assert any("DEMO OVERRIDE" in warning for warning in result.accepted_warnings)
 
-
-class DefensiveCooldownAssessment:
-    state = RiskState.DEFENSIVE
-    state_reason = "recent loss cooldown"
-    cooldown_until = "2026-07-22T03:00:00+00:00"
-    risk_multiplier = Decimal("0.50")
-    new_entries_blocked = True
-
-
-def test_demo_defensive_cooldown_override_bypasses_cooldown_only() -> None:
-    result = CommanderErwinService().evaluate(
-        proposal(),
-        account(),
-        profile(),
-        Decimal("0.5"),
-        defensive_risk=DefensiveCooldownAssessment(),
-        override_defensive_cooldown=True,
-    )
-    assert result.status is ProposalStatus.APPROVED
-    assert any("defensive cooldown" in warning for warning in result.accepted_warnings)
-
-
-def test_demo_defensive_cooldown_override_does_not_bypass_halted_state() -> None:
-    assessment = DefensiveCooldownAssessment()
-    assessment.state = RiskState.HALTED
-    result = CommanderErwinService().evaluate(
-        proposal(),
-        account(),
-        profile(),
-        Decimal("0.5"),
-        defensive_risk=assessment,
-        override_defensive_cooldown=True,
-    )
-    assert result.status is ProposalStatus.REJECTED

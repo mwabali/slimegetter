@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     trading_mode: Literal["demo", "live"] = "demo"
     demo_trading_confirmed: bool = False
     demo_entry_enabled: bool = True
+    demo_override_daily_loss_stop: bool = False
     demo_override_weekly_loss_stop: bool = False
-    demo_override_defensive_cooldown_until: datetime | None = None
     demo_strategy_engine: Literal["DIRECTIONAL", "AVENGER_STRADDLE"] = "AVENGER_STRADDLE"
     avenger_profile_mode: Literal["HYBRID", "THOR", "FLASH"] = "HYBRID"
     avenger_volume: float = Field(default=0.01, gt=0)
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     risk_halted_recovery_wins: int = Field(default=0, ge=0, le=100)
     risk_auto_reset_session_boundary: bool = True
     risk_session_reset_hour_utc: int = Field(default=0, ge=0, le=23)
-    risk_loss_cooldown_seconds: int = Field(default=60, ge=0, le=86400)
+    risk_loss_cooldown_seconds: int = Field(default=600, ge=0, le=86400)
     risk_hard_stop_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
     risk_defensive_cooldown_seconds: int = Field(default=900, ge=0, le=86400)
     avenger_trigger_spread_multiplier: float = Field(default=3.0, ge=0, le=20)

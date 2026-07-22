@@ -123,7 +123,6 @@ def calculate_allowed_volume(
     assessment: RiskStateAssessment,
     specification: SymbolSpecification,
     mode: RiskSizingMode | str,
-    allow_cooldown_override: bool = False,
 ) -> DefensiveVolumeDecision:
     """Authorize a new volume without ever rounding defensive risk upward."""
     mode = RiskSizingMode(mode)
@@ -142,11 +141,9 @@ def calculate_allowed_volume(
     actual = _floor_to_step(baseline, specification.volume_step)
 
     if mode is not RiskSizingMode.OFF and assessment.new_entries_blocked:
-        cooldown_only = assessment.state not in {RiskState.HALTED, RiskState.UNKNOWN} and assessment.cooldown_until is not None
-        if not (allow_cooldown_override and cooldown_only):
-            raise DefensiveVolumeBlocked(
-                f"New entries blocked by defensive state {assessment.state}: {assessment.state_reason}"
-            )
+        raise DefensiveVolumeBlocked(
+            f"New entries blocked by defensive state {assessment.state}: {assessment.state_reason}"
+        )
     if mode is RiskSizingMode.DEMO_ACTIVE:
         if adaptive < specification.volume_min:
             raise DefensiveVolumeBlocked(
@@ -177,7 +174,6 @@ def calculate_allowed_volume(
             if mode is RiskSizingMode.OFF
             else (
                 f"{assessment.state} risk state applied at {multiplier}x"
-                + ("; DEMO defensive cooldown override active" if allow_cooldown_override and assessment.new_entries_blocked else "")
             )
         ),
     )
